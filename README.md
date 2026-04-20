@@ -98,10 +98,46 @@ inspect the HTML to identify the right selector to add:
 python scraper.py Challenge34 --save-html page.html
 ```
 
+## Step 2 — ChessBase MegaDatabase
+
+Export the MegaDatabase from ChessBase once (**File → Export → Export Database as PGN**),
+then build a local SQLite index for fast per-player lookups.
+
+### Build the index (once)
+
+```bash
+python -m megabase.indexer mega.pgn
+python -m megabase.indexer mega.pgn --db /data/megabase.db   # custom path
+```
+
+Streams the PGN — never loads the whole file into memory. Progress is printed every 10,000 games.
+
+### Query by player name
+
+```bash
+python -m megabase.query "Kasparov, Garry"
+python -m megabase.query "Kasparov, Garry" --output json
+python -m megabase.query "Kasparov" --limit 50              # partial name match
+python -m megabase.query "Kasparov, Garry" --db /data/megabase.db
+```
+
+Returns PGN (default) or JSON. Matching is case-insensitive and covers both White and Black.
+
+### Python API
+
+```python
+from megabase.query import get_player_games
+
+games = get_player_games("Kasparov, Garry", db_path="megabase.db")
+for game in games:
+    print(game["event"], game["date"], game["result"])
+    print(game["pgn"])
+```
+
 ## Roadmap
 
 - [x] Step 1 — Scrape tournament entry lists (kingregistration, chessaction)
-- [ ] Step 2 — Look up each player on USCF / chess.com / Lichess
-- [ ] Step 3 — Fetch recent games per player
+- [x] Step 2 — Index ChessBase MegaDatabase for fast player lookups
+- [ ] Step 3 — Look up each player on USCF / chess.com / Lichess
 - [ ] Step 4 — Analyse openings and tendencies
 - [ ] Step 5 — Generate per-opponent dossier report
