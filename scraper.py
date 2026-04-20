@@ -1,13 +1,19 @@
 """
-Scraper for kingregistration.com tournament entry lists.
+Scrape tournament entry lists from kingregistration.com or chessaction.com.
 
 Usage:
-  python scraper.py <tournament_id_or_url> [--output csv|json] [--save-html FILE]
+  python scraper.py <tournament> [--site kingregistration|chessaction] [--output csv|json]
+
+Tournament can be:
+  - A tournament ID shorthand  (resolved using --site, default: kingregistration)
+  - A full URL                 (site auto-detected; --site flag ignored)
 
 Examples:
   python scraper.py Challenge34
-  python scraper.py https://www.kingregistration.com/entrylist/Challenge34
   python scraper.py Challenge34 --output json
+  python scraper.py nKGioA== --site chessaction
+  python scraper.py https://www.kingregistration.com/entrylist/Challenge34
+  python scraper.py "https://chessaction.com/tournaments/advance_entry_list.php?tid=nKGioA=="
   python scraper.py Challenge34 --save-html page.html
 """
 
@@ -19,7 +25,12 @@ import requests
 from bs4 import BeautifulSoup
 
 
-BASE_URL = "https://www.kingregistration.com/entrylist"
+# --- Site URL templates ---------------------------------------------------
+
+_SITES = {
+    "kingregistration": "https://www.kingregistration.com/entrylist/{tid}",
+    "chessaction":      "https://chessaction.com/tournaments/advance_entry_list.php?tid={tid}",
+}
 
 _HEADERS = {
     "User-Agent": (
@@ -34,28 +45,46 @@ _HEADERS = {
 _HEADER_MAP = {
     "name": "name",
     "player": "name",
+    "player name": "name",
     "full name": "name",
+    "last, first": "name",
     "rating": "rating",
     "rtng": "rating",
     "uscf rating": "rating",
+    "pre-rating": "rating",
+    "pre rating": "rating",
     "uscf": "uscf_id",
     "uscf id": "uscf_id",
+    "uscf#": "uscf_id",
     "id": "uscf_id",
     "section": "section",
     "division": "section",
     "club": "club",
+    "team": "club",
     "state": "state",
     "grade": "grade",
     "school": "school",
+    "city": "city",
 }
 
 
-def resolve_url(tournament: str) -> str:
+# --- URL resolution -------------------------------------------------------
+
+def _detect_site(url: str) -> str | None:
+    for site in _SITES:
+        if site in url:
+            return site
+    return None
+
+
+def resolve_url(tournament: str, site: str = "kingregistration") -> str:
     if tournament.startswith("http"):
         return tournament
-    tournament = tournament.rstrip("/").split("/")[-1]
-    return f"{BASE_URL}/{tournament}"
+    tid = tournament.rstrip("/").split("/")[-1]
+    return _SITES[site].format(tid=tid)
 
+
+# --- Fetching & parsing ---------------------------------------------------
 
 def fetch_html(url: str) -> str:
     resp = requests.get(url, headers=_HEADERS, timeout=15)
@@ -85,7 +114,6 @@ def parse_entry_list(html: str) -> list[dict]:
         if players:
             return players
 
-    # Diagnostic: show what the page actually contains
     print("No player table found. Page text preview:", file=sys.stderr)
     print(soup.get_text(separator="\n", strip=True)[:2000], file=sys.stderr)
     return []
@@ -98,9 +126,18 @@ def _normalize(entry: dict) -> dict:
     }
 
 
-def scrape_entry_list(tournament: str, save_html: str | None = None) -> list[dict]:
-    url = resolve_url(tournament)
-    print(f"Fetching: {url}", file=sys.stderr)
+# --- Main entry point -----------------------------------------------------
+
+def scrape_entry_list(tournament: str, site: str = "kingregistration",
+                      save_html: str | None = None) -> list[dict]:
+    # Auto-detect site from full URLs so --site flag is optional
+    if tournament.startswith("http"):
+        detected = _detect_site(tournament)
+        if detected:
+            site = detected
+
+    url = resolve_url(tournament, site)
+    print(f"[{site}] Fetching: {url}", file=sys.stderr)
 
     html = fetch_html(url)
 
@@ -113,6 +150,8 @@ def scrape_entry_list(tournament: str, save_html: str | None = None) -> list[dic
     print(f"Found {len(players)} player(s).", file=sys.stderr)
     return players
 
+
+# --- Output helpers -------------------------------------------------------
 
 def output_csv(players: list[dict]) -> None:
     if not players:
@@ -130,11 +169,15 @@ def output_json(players: list[dict]) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Scrape a kingregistration.com tournament entry list.",
+        description="Scrape a chess tournament entry list.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("tournament", help="Tournament ID (e.g. Challenge34) or full URL")
+    parser.add_argument("tournament", help="Tournament ID shorthand or full URL")
+    parser.add_argument(
+        "--site", choices=list(_SITES), default="kingregistration",
+        help="Site to scrape (default: kingregistration). Ignored when a full URL is given.",
+    )
     parser.add_argument(
         "--output", choices=["csv", "json"], default="csv",
         help="Output format (default: csv)",
@@ -145,7 +188,7 @@ def main():
     )
     args = parser.parse_args()
 
-    players = scrape_entry_list(args.tournament, save_html=args.save_html)
+    players = scrape_entry_list(args.tournament, site=args.site, save_html=args.save_html)
 
     if args.output == "json":
         output_json(players)
