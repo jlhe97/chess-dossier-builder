@@ -104,6 +104,11 @@ def parse_entry_list(html: str) -> list[dict]:
         if not headers:
             continue
 
+        # Skip tables with no recognised chess columns (e.g. nav/layout tables)
+        known = {_HEADER_MAP.get(h.lower().strip()) for h in headers} - {None}
+        if not known:
+            continue
+
         players = []
         for row in rows[1:]:
             cells = [td.get_text(strip=True) for td in row.find_all(["th", "td"])]

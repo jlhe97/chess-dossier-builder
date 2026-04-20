@@ -18,6 +18,14 @@ Build opponent dossiers for players registered in the same chess tournament.
 pip install -r requirements.txt
 ```
 
+### Tests
+
+```bash
+pytest tests/ -v
+```
+
+All tests run offline using HTML fixtures — no network required.
+
 ### Usage
 
 **kingregistration.com** (default)
