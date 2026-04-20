@@ -101,7 +101,10 @@ python scraper.py Challenge34 --save-html page.html
 ## Roadmap
 
 - [x] Step 1 — Scrape tournament entry lists (kingregistration, chessaction)
-- [ ] Step 2 — Look up each player on USCF / chess.com / Lichess
-- [ ] Step 3 — Fetch recent games per player
+- [ ] Step 2 — Index ChessBase MegaDatabase for fast player lookups
+  - 2a. Export MegaDatabase to PGN from ChessBase (File → Export → Export Database as PGN)
+  - 2b. Stream PGN into a local SQLite index keyed on player name
+  - 2c. Query index by name to retrieve all games as PGN
+- [ ] Step 3 — Look up each player on USCF / chess.com / Lichess
 - [ ] Step 4 — Analyse openings and tendencies
 - [ ] Step 5 — Generate per-opponent dossier report
