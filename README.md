@@ -1,5 +1,7 @@
 # Chess Dossier Builder
 
+[![CI](https://github.com/jlhe97/chess-dossier-builder/actions/workflows/ci.yml/badge.svg)](https://github.com/jlhe97/chess-dossier-builder/actions/workflows/ci.yml)
+
 Build opponent dossiers for players registered in the same chess tournament.
 
 ## Step 1 — Scrape tournament entry lists
