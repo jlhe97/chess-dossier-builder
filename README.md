@@ -134,10 +134,61 @@ for game in games:
     print(game["pgn"])
 ```
 
+## Step 3 — Online profile lookup (Lichess & chess.com)
+
+Given a player name from the tournament entry list, find their online profiles and fetch recent games.
+
+### Lichess
+
+```bash
+# Search by name → candidate usernames
+python -m lookup.lichess search "Magnus Carlsen"
+
+# Fetch profile by known username
+python -m lookup.lichess profile DrNykterstein
+
+# Fetch recent games (PGN or JSON)
+python -m lookup.lichess games DrNykterstein
+python -m lookup.lichess games DrNykterstein --max 20 --output json
+python -m lookup.lichess games DrNykterstein --perf classical
+```
+
+### chess.com
+
+chess.com has no public search endpoint. Use `find` to try common username
+patterns derived from the player name, or `profile` if the username is known.
+
+```bash
+# Guess username from name and try each candidate
+python -m lookup.chesscom find "Carlsen, Magnus"
+
+# Fetch profile by known username
+python -m lookup.chesscom profile MagnusCarlsen
+
+# Fetch recent games (last 3 months by default)
+python -m lookup.chesscom games MagnusCarlsen
+python -m lookup.chesscom games MagnusCarlsen --months 6 --output json
+```
+
+### Python API
+
+```python
+from lookup.lichess import search, get_games
+from lookup.chesscom import find_profile, games_as_pgn
+
+# Lichess
+candidates = search("Smith, John")  # returns list of profile dicts
+pgn = get_games("username", max=50)
+
+# chess.com
+profile = find_profile("Smith, John")  # tries username guesses, returns first match
+pgn = games_as_pgn("username", months=3)
+```
+
 ## Roadmap
 
 - [x] Step 1 — Scrape tournament entry lists (kingregistration, chessaction)
 - [x] Step 2 — Index ChessBase MegaDatabase for fast player lookups
-- [ ] Step 3 — Look up each player on USCF / chess.com / Lichess
+- [x] Step 3 — Look up each player on Lichess and chess.com
 - [ ] Step 4 — Analyse openings and tendencies
 - [ ] Step 5 — Generate per-opponent dossier report
