@@ -303,6 +303,59 @@ dossier = build_dossier("Smith, John", pgn_strings, profiles=profiles)
 print(render_markdown(dossier))
 ```
 
+## Step 6 — End-to-end pipeline
+
+One command turns a tournament URL into a folder of per-opponent dossiers.
+
+```bash
+# By tournament ID (kingregistration.com, default)
+python -m pipeline.runner Challenge34
+
+# By full URL (site auto-detected)
+python -m pipeline.runner "https://chessaction.com/tournaments/advance_entry_list.php?tid=nKGioA=="
+
+# Custom output directory and game limits
+python -m pipeline.runner Challenge34 --output-dir ./dossiers --max-games 30 --chesscom-months 6
+
+# JSON output (no combined.md)
+python -m pipeline.runner Challenge34 --format json
+```
+
+**All flags**
+```
+python -m pipeline.runner <tournament>
+    [--site kingregistration|chessaction]
+    [--output-dir DIR]       default: dossiers/
+    [--max-games N]          Lichess games to fetch per player (default: 50)
+    [--chesscom-months N]    chess.com history window in months (default: 3)
+    [--depth N]              opening depth in half-moves (default: 6)
+    [--top N]                top N opening lines per colour (default: 8)
+    [--format markdown|json] output format (default: markdown)
+```
+
+**Output**
+```
+dossiers/
+  smith_john.md     ← one file per opponent
+  doe_jane.md
+  combined.md       ← all dossiers concatenated (markdown mode only)
+```
+
+Low-confidence name→handle matches are flagged in the report:
+```
+## Online Profiles
+- **Lichess**: [xyz99](https://lichess.org/@/xyz99) ⚠️ *low-confidence match*
+```
+
+### Python API
+
+```python
+from pipeline.runner import run_pipeline
+
+paths = run_pipeline("Challenge34", output_dir="dossiers", max_games=50)
+# returns list of Path objects for written files
+```
+
 ## Roadmap
 
 - [x] Step 1 — Scrape tournament entry lists (kingregistration, chessaction)
@@ -310,8 +363,10 @@ print(render_markdown(dossier))
 - [x] Step 3 — Look up each player on Lichess and chess.com
 - [x] Step 4 — Analyse openings and tendencies
 - [x] Step 5 — Generate per-opponent dossier report
-- [ ] Step 6 — End-to-end pipeline
+- [x] Step 6 — End-to-end pipeline
   - Single command: tournament URL → dossiers for every opponent
   - Name → handle resolver: Lichess autocomplete + chess.com guesser, pick best candidate automatically; flag low-confidence matches in the report
-  - Fetch games from MegaDatabase index + Lichess + chess.com and merge
-  - Output: folder of Markdown files (one per opponent) + single combined PDF
+  - Fetches games from Lichess and chess.com and merges into a single dossier
+  - Output: folder of Markdown files (one per opponent) + `combined.md`
+  - [ ] MegaDatabase integration (once SQLite index is built)
+  - [ ] Combined PDF output
