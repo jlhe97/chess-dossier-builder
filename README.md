@@ -310,3 +310,4 @@ print(render_markdown(dossier))
 - [x] Step 3 — Look up each player on Lichess and chess.com
 - [x] Step 4 — Analyse openings and tendencies
 - [x] Step 5 — Generate per-opponent dossier report
+- [ ] Step 6 — End-to-end pipeline: tournament URL → resolve Lichess/chess.com handles → fetch games → generate all dossiers in one command
