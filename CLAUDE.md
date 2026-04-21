@@ -28,6 +28,9 @@ megabase/          → one-time SQLite index of ChessBase PGN export → game PG
 lookup/            → Lichess + chess.com API → online profiles + game PGNs
 analysis/          → PGN strings → opening repertoire + tendency stats
 dossier/           → all of the above → rendered Markdown/JSON report
+pipeline/          → end-to-end orchestrator: tournament → dossier folder
+  resolver.py      → name → (username, confidence) for Lichess and chess.com
+  runner.py        → run_pipeline(): scrape → resolve → fetch → build → write
 ```
 
 ### Data flow
@@ -56,8 +59,19 @@ dossier/           → all of the above → rendered Markdown/JSON report
 
 Full URLs are auto-detected; `--site` is only needed for ID shorthands.
 
+### Step 6 pipeline details
+
+`pipeline/resolver.py`:
+- `_similarity(a, b)` — case-insensitive `SequenceMatcher` ratio on normalised strings
+- `resolve_lichess(name)` → `(username, "high"|"low"|None)` — calls `lookup.lichess.search()`, scores top result against player name; `>=0.55` → high, `>=0.30` → low
+- `resolve_chesscom(name)` → `(username, "high"|"low"|None)` — tries `guess_usernames()` patterns; first 2 hits → high, later → low
+
+`pipeline/runner.py`:
+- `run_pipeline(tournament, ...)` — full orchestration; returns `list[Path]` of written files
+- Writes `<output_dir>/<slug>.md` per player and `combined.md` in markdown mode
+- Low-confidence profiles get `"confidence": "low"` injected before being passed to `build_dossier()`
+
 ### Roadmap
 
-- Steps 1–5 are complete (scraping, megabase indexing, online lookup, analysis, dossier generation).
-- Step 6 (end-to-end pipeline): tournament URL → auto-resolve Lichess/chess.com handles → fetch games → generate all dossiers as a folder of Markdown files + combined PDF. Name→handle resolution picks the best autocomplete candidate and flags low-confidence matches in the report.
-- MegaDatabase integration will be added to Step 6 once the SQLite index is built.
+- Steps 1–6 are complete.
+- Remaining: MegaDatabase integration into Step 6, combined PDF output.

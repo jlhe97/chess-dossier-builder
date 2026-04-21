@@ -79,8 +79,9 @@ def render_markdown(dossier: dict) -> str:
                 f"{k.capitalize()}: {v}" for k, v in p.get("ratings", {}).items()
             )
             title = f"{p['title']} " if p.get("title") else ""
+            flag = " ⚠️ *low-confidence match*" if p.get("confidence") == "low" else ""
             lines.append(f"- **{site}**: [{title}{p['display_name']}]({p['url']})"
-                         + (f" — {ratings}" if ratings else ""))
+                         + (f" — {ratings}" if ratings else "") + flag)
         lines.append("")
 
     # --- Overview ---
