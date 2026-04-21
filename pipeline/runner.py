@@ -5,12 +5,12 @@ Usage:
   python -m pipeline.runner Challenge34
   python -m pipeline.runner Challenge34 --site kingregistration --output-dir ./dossiers
   python -m pipeline.runner "https://chessaction.com/tournaments/advance_entry_list.php?tid=nKGioA=="
-  python -m pipeline.runner Challenge34 --max-games 30 --format json
+  python -m pipeline.runner Challenge34 --max-games 30 --format html
 
-Output (default):
+Output (default html):
   <output-dir>/
-    smith_john.md       ← one file per opponent
-    combined.md         ← all dossiers concatenated (print-friendly)
+    smith_john.html     ← one file per opponent
+    combined.html       ← all dossiers with nav (printable)
 """
 
 import re
@@ -19,7 +19,7 @@ import argparse
 from pathlib import Path
 
 from scraper import scrape_entry_list
-from dossier.report import build_dossier, render_markdown, render_json
+from dossier.report import build_dossier, render_markdown, render_html, render_html_combined, render_json
 from pipeline.resolver import resolve_lichess, resolve_chesscom
 
 
@@ -72,7 +72,7 @@ def run_pipeline(
     chesscom_months: int = 3,
     depth: int = 6,
     top: int = 8,
-    fmt: str = "markdown",
+    fmt: str = "html",
 ) -> list[Path]:
     """
     Run the full pipeline for a tournament. Returns list of written file paths.
@@ -88,7 +88,7 @@ def run_pipeline(
     print(f"Found {len(players)} player(s).", file=sys.stderr)
 
     written: list[Path] = []
-    combined_parts: list[str] = []
+    dossiers: list[dict] = []
 
     for i, player in enumerate(players, 1):
         name = player.get("name", "").strip()
@@ -129,10 +129,14 @@ def run_pipeline(
 
         dossier = build_dossier(name, pgn_strings, profiles=profiles,
                                 depth=depth, top=top)
+        dossiers.append(dossier)
 
         if fmt == "json":
             content = render_json(dossier)
             ext = "json"
+        elif fmt == "html":
+            content = render_html(dossier)
+            ext = "html"
         else:
             content = render_markdown(dossier)
             ext = "md"
@@ -140,14 +144,19 @@ def run_pipeline(
         path = out / f"{_slug(name)}.{ext}"
         path.write_text(content, encoding="utf-8")
         written.append(path)
-        combined_parts.append(content)
         print(f"  Saved → {path}", file=sys.stderr)
 
     # --- Combined output ---
-    if combined_parts and fmt == "markdown":
-        sep = "\n\n---\n\n"
+    if dossiers and fmt == "markdown":
         combined = out / "combined.md"
-        combined.write_text(sep.join(combined_parts), encoding="utf-8")
+        combined.write_text(
+            "\n\n---\n\n".join(render_markdown(d) for d in dossiers), encoding="utf-8"
+        )
+        written.append(combined)
+        print(f"\nCombined → {combined}", file=sys.stderr)
+    elif dossiers and fmt == "html":
+        combined = out / "combined.html"
+        combined.write_text(render_html_combined(dossiers), encoding="utf-8")
         written.append(combined)
         print(f"\nCombined → {combined}", file=sys.stderr)
 
@@ -172,8 +181,8 @@ def main() -> None:
                         help="Opening depth in half-moves (default: 6)")
     parser.add_argument("--top", type=int, default=8,
                         help="Top N opening lines per colour (default: 8)")
-    parser.add_argument("--format", dest="fmt", choices=["markdown", "json"],
-                        default="markdown")
+    parser.add_argument("--format", dest="fmt", choices=["markdown", "html", "json"],
+                        default="html")
     args = parser.parse_args()
 
     run_pipeline(

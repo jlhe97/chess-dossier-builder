@@ -12,7 +12,7 @@ import requests
 
 from pipeline.resolver import resolve_lichess, resolve_chesscom, _similarity
 from pipeline.runner import _slug, run_pipeline
-from dossier.report import build_dossier, render_markdown
+from dossier.report import build_dossier, render_markdown, render_html, render_html_combined
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +162,65 @@ class TestConfidenceFlag:
 
 
 # ---------------------------------------------------------------------------
+# HTML renderer
+# ---------------------------------------------------------------------------
+
+class TestRenderHtml:
+    def _dossier(self, confidence=None):
+        profile = {
+            "username": "jsmith", "display_name": "jsmith", "title": None,
+            "ratings": {"rapid": 1800}, "url": "https://lichess.org/@/jsmith",
+        }
+        if confidence is not None:
+            profile["confidence"] = confidence
+        return build_dossier("Smith, John", [_pgn("Smith, John", "Opp", "1-0")],
+                              profiles=[profile])
+
+    def test_returns_valid_html(self):
+        html = render_html(self._dossier())
+        assert html.startswith("<!doctype html")
+        assert "<title>" in html
+        assert "</html>" in html
+
+    def test_contains_player_name(self):
+        html = render_html(self._dossier())
+        assert "Smith, John" in html
+
+    def test_contains_as_white_section(self):
+        html = render_html(self._dossier())
+        assert "As White" in html
+
+    def test_contains_as_black_section(self):
+        html = render_html(self._dossier())
+        assert "As Black" in html
+
+    def test_low_confidence_shows_warning(self):
+        html = render_html(self._dossier(confidence="low"))
+        assert "low-confidence" in html
+
+    def test_high_confidence_no_warning(self):
+        html = render_html(self._dossier(confidence="high"))
+        assert "low-confidence" not in html
+
+    def test_win_pct_colour_class_present(self):
+        html = render_html(self._dossier())
+        assert any(c in html for c in ("wp-hi", "wp-mid", "wp-lo"))
+
+    def test_combined_has_nav_and_all_players(self):
+        d1 = build_dossier("Smith, John", [_pgn("Smith, John", "Opp", "1-0")])
+        d2 = build_dossier("Doe, Jane",   [_pgn("Doe, Jane",   "Opp", "0-1")])
+        html = render_html_combined([d1, d2])
+        assert "Smith, John" in html
+        assert "Doe, Jane" in html
+        assert "<nav>" in html
+
+    def test_combined_has_section_anchors(self):
+        d1 = build_dossier("Smith, John", [_pgn("Smith, John", "Opp", "1-0")])
+        html = render_html_combined([d1])
+        assert "id='smith_john'" in html
+
+
+# ---------------------------------------------------------------------------
 # run_pipeline (fully mocked)
 # ---------------------------------------------------------------------------
 
@@ -192,7 +251,7 @@ class TestRunPipeline:
     @patch("pipeline.runner.resolve_lichess",  return_value=(None, None))
     @patch("pipeline.runner.scrape_entry_list", return_value=MOCK_PLAYERS)
     def test_creates_per_player_files(self, mock_scrape, mock_lich, mock_cc, tmp_path):
-        run_pipeline("Challenge34", output_dir=str(tmp_path))
+        run_pipeline("Challenge34", output_dir=str(tmp_path), fmt="markdown")
         assert (tmp_path / "smith_john.md").exists()
         assert (tmp_path / "doe_jane.md").exists()
 
@@ -200,14 +259,14 @@ class TestRunPipeline:
     @patch("pipeline.runner.resolve_lichess",  return_value=(None, None))
     @patch("pipeline.runner.scrape_entry_list", return_value=MOCK_PLAYERS)
     def test_creates_combined_md(self, mock_scrape, mock_lich, mock_cc, tmp_path):
-        run_pipeline("Challenge34", output_dir=str(tmp_path))
+        run_pipeline("Challenge34", output_dir=str(tmp_path), fmt="markdown")
         assert (tmp_path / "combined.md").exists()
 
     @patch("pipeline.runner.resolve_chesscom", return_value=(None, None))
     @patch("pipeline.runner.resolve_lichess",  return_value=(None, None))
     @patch("pipeline.runner.scrape_entry_list", return_value=MOCK_PLAYERS)
     def test_combined_contains_all_players(self, mock_scrape, mock_lich, mock_cc, tmp_path):
-        run_pipeline("Challenge34", output_dir=str(tmp_path))
+        run_pipeline("Challenge34", output_dir=str(tmp_path), fmt="markdown")
         combined = (tmp_path / "combined.md").read_text()
         assert "Smith, John" in combined
         assert "Doe, Jane" in combined
@@ -234,7 +293,7 @@ class TestRunPipeline:
            return_value=[{"name": "Smith, John", "rating": "1800"}])
     def test_games_fed_into_dossier(self, mock_scrape, mock_lich, mock_cc,
                                     mock_fetch_lich, mock_fetch_cc, tmp_path):
-        run_pipeline("Challenge34", output_dir=str(tmp_path))
+        run_pipeline("Challenge34", output_dir=str(tmp_path), fmt="markdown")
         md = (tmp_path / "smith_john.md").read_text()
         assert "Smith, John" in md
         assert "## Overview" in md
@@ -246,3 +305,22 @@ class TestRunPipeline:
         run_pipeline("Challenge34", output_dir=str(tmp_path), fmt="json")
         assert (tmp_path / "smith_john.json").exists()
         assert not (tmp_path / "combined.md").exists()
+
+    @patch("pipeline.runner.resolve_chesscom", return_value=(None, None))
+    @patch("pipeline.runner.resolve_lichess",  return_value=(None, None))
+    @patch("pipeline.runner.scrape_entry_list", return_value=MOCK_PLAYERS)
+    def test_html_format_creates_files(self, mock_scrape, mock_lich, mock_cc, tmp_path):
+        run_pipeline("Challenge34", output_dir=str(tmp_path), fmt="html")
+        assert (tmp_path / "smith_john.html").exists()
+        assert (tmp_path / "doe_jane.html").exists()
+        assert (tmp_path / "combined.html").exists()
+
+    @patch("pipeline.runner.resolve_chesscom", return_value=(None, None))
+    @patch("pipeline.runner.resolve_lichess",  return_value=(None, None))
+    @patch("pipeline.runner.scrape_entry_list", return_value=MOCK_PLAYERS)
+    def test_html_combined_has_nav(self, mock_scrape, mock_lich, mock_cc, tmp_path):
+        run_pipeline("Challenge34", output_dir=str(tmp_path), fmt="html")
+        html = (tmp_path / "combined.html").read_text()
+        assert "<nav>" in html
+        assert "Smith, John" in html
+        assert "Doe, Jane" in html
