@@ -187,10 +187,65 @@ profile = find_profile("Smith, John")  # tries username guesses, returns first m
 pgn = games_as_pgn("username", months=3)
 ```
 
+## Step 4 — Opening and tendency analysis
+
+Given a list of PGN strings and a player name, produces a full opening
+repertoire breakdown and broad tendency statistics.
+
+### Opening repertoire
+
+```bash
+python -m analysis.openings games.pgn "Smith, John"
+python -m analysis.openings games.pgn "Smith, John" --depth 8 --top 10
+```
+
+Output (JSON):
+```json
+{
+  "as_white": [
+    {"line": "1. e4 e5 2. Nf3 Nc6 3. Bb5", "count": 18, "wins": 10, "draws": 5, "losses": 3, "win_pct": 55.6}
+  ],
+  "as_black": [
+    {"line": "1. e4 c5 2. Nf3 d6 3. d4 cxd4", "count": 12, "wins": 6, "draws": 4, "losses": 2, "win_pct": 50.0}
+  ]
+}
+```
+
+### Tendency statistics
+
+```bash
+python -m analysis.stats games.pgn "Smith, John"
+```
+
+Output (JSON):
+```json
+{
+  "total": 50,
+  "as_white": {"count": 27, "wins": 14, "draws": 8, "losses": 5, "win_pct": 51.9},
+  "as_black": {"count": 23, "wins": 10, "draws": 9, "losses": 4, "win_pct": 43.5},
+  "overall":  {"wins": 24, "draws": 17, "losses": 9, "win_pct": 48.0},
+  "avg_length": 38.4,
+  "vs_e4": [...],
+  "vs_d4": [...]
+}
+```
+
+### Python API
+
+```python
+from analysis.openings import analyse_openings
+from analysis.stats import analyse_stats
+
+pgn_strings = [game["pgn"] for game in games]  # from megabase or lookup
+
+openings = analyse_openings(pgn_strings, "Smith, John", depth=6, top=10)
+stats    = analyse_stats(pgn_strings, "Smith, John")
+```
+
 ## Roadmap
 
 - [x] Step 1 — Scrape tournament entry lists (kingregistration, chessaction)
 - [x] Step 2 — Index ChessBase MegaDatabase for fast player lookups
 - [x] Step 3 — Look up each player on Lichess and chess.com
-- [ ] Step 4 — Analyse openings and tendencies
+- [x] Step 4 — Analyse openings and tendencies
 - [ ] Step 5 — Generate per-opponent dossier report
