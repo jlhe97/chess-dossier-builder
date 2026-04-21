@@ -242,10 +242,71 @@ openings = analyse_openings(pgn_strings, "Smith, John", depth=6, top=10)
 stats    = analyse_stats(pgn_strings, "Smith, John")
 ```
 
+## Step 5 — Dossier report
+
+Ties the full pipeline together into a single Markdown or JSON report per opponent.
+
+```bash
+# From a PGN file
+python -m dossier.report "Smith, John" --pgn games.pgn
+
+# From the MegaDatabase index
+python -m dossier.report "Smith, John" --megabase megabase.db
+
+# Both sources combined, with online profiles
+python -m dossier.report "Smith, John" \
+  --megabase megabase.db \
+  --lichess smithj \
+  --chesscom JohnSmith99 \
+  --output markdown > smith_john.md
+
+# JSON output (for further processing)
+python -m dossier.report "Smith, John" --megabase megabase.db --output json
+```
+
+### Sample output
+
+```markdown
+# Dossier: Smith, John
+*Generated 2026-04-21 · 50 games analysed*
+
+## Online Profiles
+- **Lichess**: [jsmith](https://lichess.org/@/jsmith) — Rapid: 1750, Blitz: 1700
+
+## Overview
+| | White | Black | Overall |
+|---|---|---|---|
+| Games | 27 | 23 | 50 |
+| Win % | 55.6% | 43.5% | 50.0% |
+
+## As White
+| Opening | Games | W | D | L | Win% |
+|---|---|---|---|---|---|
+| `1. e4 e5 2. Nf3 Nc6 3. Bb5` | 18 | 10 | 5 | 3 | 55.6% |
+
+## As Black
+### vs 1. e4
+| Opening | Games | W | D | L | Win% |
+|---|---|---|---|---|---|
+| `1. e4 c5 2. Nf3 d6 3. d4 cxd4` | 10 | 5 | 3 | 2 | 50.0% |
+```
+
+### Python API
+
+```python
+from dossier.report import build_dossier, render_markdown
+
+pgn_strings = [game["pgn"] for game in megabase_games]
+profiles    = [lichess_profile, chesscom_profile]
+
+dossier = build_dossier("Smith, John", pgn_strings, profiles=profiles)
+print(render_markdown(dossier))
+```
+
 ## Roadmap
 
 - [x] Step 1 — Scrape tournament entry lists (kingregistration, chessaction)
 - [x] Step 2 — Index ChessBase MegaDatabase for fast player lookups
 - [x] Step 3 — Look up each player on Lichess and chess.com
 - [x] Step 4 — Analyse openings and tendencies
-- [ ] Step 5 — Generate per-opponent dossier report
+- [x] Step 5 — Generate per-opponent dossier report
