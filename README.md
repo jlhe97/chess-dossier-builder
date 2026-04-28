@@ -367,6 +367,22 @@ paths = run_pipeline("Challenge34", output_dir="dossiers", max_games=50)
   - Single command: tournament URL → dossiers for every opponent
   - Name → handle resolver: Lichess autocomplete + chess.com guesser, pick best candidate automatically; flag low-confidence matches in the report
   - Fetches games from Lichess and chess.com and merges into a single dossier
-  - Output: folder of Markdown files (one per opponent) + `combined.md`
+  - Output: HTML per opponent + `combined.html` (colour-coded, print-ready)
   - [ ] MegaDatabase integration (once SQLite index is built)
   - [ ] Combined PDF output
+- [ ] Step 7 — Pre-game preparation agent
+  - `agent/coach.py` calls Claude (Anthropic SDK) with the structured dossier dict as input
+  - System prompt: chess coach persona; task is to produce concrete prep notes from the statistics
+  - Output: a **Preparation Notes** section injected into the HTML dossier with:
+    - Recommended opening to play as White vs this opponent (based on their worst scoring Black defences)
+    - Recommended opening to play as Black vs this opponent (based on their worst scoring White systems)
+    - Key tendencies to exploit (e.g. weak endgame conversion, time pressure patterns, avoids long games)
+  - Runs as a post-processing pass in `run_pipeline` or standalone: `python -m agent.coach smith_john.html`
+  - Operates on the **statistical layer only** — no move calculation, so hallucination risk is low
+- [ ] Step 8 — Interactive game walkthrough coach
+  - Hybrid Stockfish + Claude agent for replaying an opponent's past games move by move
+  - Stockfish (via `python-chess` engine interface) evaluates each position and identifies critical moments
+  - Claude narrates in plain English, grounding its commentary in the dossier: "They played the Nimzo-Indian again — consistent with their repertoire. Stockfish prefers Bg5; note they've scored 2W/5L when White plays Bg5 early."
+  - Step-through CLI (`python -m agent.walkthrough smith_john.html --pgn game.pgn`) or interactive REPL
+  - Batches Claude calls every N moves to keep API cost low
+  - Complements Maia Chess (human-move prediction) for deeper understanding of why an opponent chooses a line
