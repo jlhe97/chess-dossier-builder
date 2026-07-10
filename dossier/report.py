@@ -17,6 +17,7 @@ import argparse
 import re
 from datetime import date
 
+from pgnutil import split_pgn_games
 from analysis.openings import analyse_openings
 from analysis.stats import analyse_stats
 
@@ -80,8 +81,13 @@ def render_markdown(dossier: dict) -> str:
             )
             title = f"{p['title']} " if p.get("title") else ""
             flag = " ⚠️ *low-confidence match*" if p.get("confidence") == "low" else ""
+            match = ""
+            if p.get("match_score") is not None:
+                pct = round(p["match_score"] * 100)
+                reasons = "; ".join(p.get("match_reasons", []))
+                match = f" *(match confidence {pct}%: {reasons})*"
             lines.append(f"- **{site}**: [{title}{p['display_name']}]({p['url']})"
-                         + (f" — {ratings}" if ratings else "") + flag)
+                         + (f" — {ratings}" if ratings else "") + flag + match)
         lines.append("")
 
     # --- Overview ---
@@ -144,6 +150,11 @@ h3 { margin-top: 1.2rem; color: #444; }
 .profiles { list-style: none; padding: 0; }
 .profiles li { margin: .3rem 0; }
 .warn { color: #c0392b; font-style: italic; }
+.match { color: #888; font-size: .85em; cursor: help; }
+details summary { cursor: pointer; color: #2c3e50; font-size: .85em; }
+ul.games { list-style: none; padding: 0; margin: .3rem 0 0; font-size: .85em; }
+ul.games li { margin: .15rem 0; }
+ul.games a { color: #2c3e50; }
 table { border-collapse: collapse; width: 100%; margin: .8rem 0; font-size: .92rem; }
 th { background: #2c3e50; color: #fff; padding: .45rem .7rem; text-align: left; }
 td { padding: .35rem .7rem; border-bottom: 1px solid #ddd; }
@@ -223,10 +234,15 @@ def _html_player_section(player, stats, openings, profiles, generated, anchor=No
             title   = f"{p['title']} " if p.get("title") else ""
             warn    = " <span class='warn'>⚠ low-confidence match</span>" if p.get("confidence") == "low" else ""
             rat_str = f" — {_esc(ratings)}" if ratings else ""
+            match   = ""
+            if p.get("match_score") is not None:
+                pct = round(p["match_score"] * 100)
+                reasons = _esc("; ".join(p.get("match_reasons", [])))
+                match = f" <span class='match' title='{reasons}'>({pct}% match)</span>"
             items.append(
                 f"<li><strong>{site}</strong>: "
                 f"<a href='{p['url']}'>{_esc(title)}{_esc(p['display_name'])}</a>"
-                f"{rat_str}{warn}</li>"
+                f"{rat_str}{warn}{match}</li>"
             )
         prof_html = f"<h2>Online Profiles</h2><ul class='profiles'>{''.join(items)}</ul>"
 
@@ -278,15 +294,30 @@ def _html_player_section(player, stats, openings, profiles, generated, anchor=No
     )
 
 
+def _format_game_links_html(games: list[dict]) -> str:
+    if not games:
+        return ""
+    items = []
+    for g in games:
+        label = _esc(f"{g.get('date') or '?'} vs {g.get('opponent') or '?'} ({g.get('result') or '?'})")
+        if g.get("url"):
+            items.append(f"<li><a href='{_esc(g['url'])}' target='_blank' rel='noopener'>{label}</a></li>")
+        else:
+            items.append(f"<li>{label}</li>")
+    return f"<details><summary>{len(games)}</summary><ul class='games'>{''.join(items)}</ul></details>"
+
+
 def _html_opening_table(rows: list[dict], wp_class) -> str:
-    header = "<tr><th>Opening</th><th>Games</th><th>W</th><th>D</th><th>L</th><th>Win%</th></tr>"
+    header = "<tr><th>Opening</th><th>Games</th><th>W</th><th>D</th><th>L</th><th>Win%</th><th>Browse</th></tr>"
     def _row(r):
         cls = wp_class(r["win_pct"])
+        links = _format_game_links_html(r.get("games", []))
         return (
             f"<tr><td class='line'>{_esc(r['line'])}</td>"
             f"<td>{r['count']}</td><td>{r['wins']}</td>"
             f"<td>{r['draws']}</td><td>{r['losses']}</td>"
-            f"<td class='{cls}'>{r['win_pct']}%</td></tr>"
+            f"<td class='{cls}'>{r['win_pct']}%</td>"
+            f"<td>{links}</td></tr>"
         )
     return f"<table>{header}{''.join(_row(r) for r in rows)}</table>"
 
@@ -295,15 +326,33 @@ def render_json(dossier: dict) -> str:
     return json.dumps(dossier, indent=2, ensure_ascii=False)
 
 
+_MAX_LINKS_SHOWN = 8
+
+
+def _format_game_links_md(games: list[dict]) -> str:
+    if not games:
+        return ""
+    shown = games[:_MAX_LINKS_SHOWN]
+    parts = [
+        f"[{g.get('date') or '?'}]({g['url']})" if g.get("url") else (g.get("date") or "?")
+        for g in shown
+    ]
+    extra = len(games) - len(shown)
+    if extra > 0:
+        parts.append(f"+{extra} more")
+    return " ".join(parts)
+
+
 def _opening_table(rows: list[dict]) -> list[str]:
     out = [
-        "| Opening | Games | W | D | L | Win% |",
-        "|---|---|---|---|---|---|",
+        "| Opening | Games | W | D | L | Win% | Links |",
+        "|---|---|---|---|---|---|---|",
     ]
     for r in rows:
+        links = _format_game_links_md(r.get("games", []))
         out.append(
             f"| `{r['line']}` | {r['count']} | {r['wins']} "
-            f"| {r['draws']} | {r['losses']} | {r['win_pct']}% |"
+            f"| {r['draws']} | {r['losses']} | {r['win_pct']}% | {links} |"
         )
     return out
 
@@ -315,7 +364,7 @@ def _opening_table(rows: list[dict]) -> list[str]:
 def _load_pgns_from_file(path: str) -> list[str]:
     with open(path, encoding="utf-8", errors="replace") as fh:
         content = fh.read()
-    return [g for g in re.split(r"\n(?=\[)", content.strip()) if g.strip()]
+    return split_pgn_games(content)
 
 
 def _load_pgns_from_megabase(player: str, db_path: str) -> list[str]:

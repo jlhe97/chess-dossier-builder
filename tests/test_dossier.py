@@ -144,6 +144,22 @@ class TestRenderMarkdown:
         md = render_markdown(d)
         assert "## Online Profiles" not in md
 
+    def test_opening_table_has_links_column(self):
+        assert "| Links |" in self.md
+
+    def test_game_with_url_renders_markdown_link(self):
+        pgn = textwrap.dedent(f"""\
+            [White "{PLAYER}"]
+            [Black "Opponent Z"]
+            [Site "https://lichess.org/gameid123"]
+            [Result "1-0"]
+
+            1. e4 e5 1-0
+        """)
+        d = build_dossier(PLAYER, [pgn])
+        md = render_markdown(d)
+        assert "(https://lichess.org/gameid123)" in md
+
 
 # ---------------------------------------------------------------------------
 # render_json
