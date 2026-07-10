@@ -8,11 +8,14 @@ from datetime import date
 
 import pytest
 
-from lookup.lichess import search, get_profile, get_games, games_as_pgn, _slim_profile
+from lookup.lichess import (
+    search, get_profile, get_games, games_as_pgn, _slim_profile,
+    get_studies, get_study_pgn, find_usernames_via_search as lichess_find_usernames_via_search,
+)
 from lookup.chesscom import (
     get_profile as cc_get_profile, get_games as cc_get_games,
     games_as_pgn as cc_games_as_pgn, guess_usernames, find_profile,
-    _recent_months, _slim_profile as cc_slim_profile,
+    find_usernames_via_search, _recent_months, _slim_profile as cc_slim_profile,
 )
 
 
@@ -110,8 +113,42 @@ class TestLichessSlimProfile:
         data = {**LICHESS_USER, "perfs": {}}
         assert _slim_profile(data)["ratings"] == {}
 
+    def test_missing_profile_omitted(self):
+        p = _slim_profile(LICHESS_USER)
+        assert p["real_name"] is None
+        assert p["country"] is None
+        assert p["fide_rating"] is None
+
+    def test_extracts_profile_fields(self):
+        data = {**LICHESS_USER, "profile": {
+            "realName": "Garry Kasparov", "flag": "RU", "fideRating": 2812,
+        }}
+        p = _slim_profile(data)
+        assert p["real_name"] == "Garry Kasparov"
+        assert p["country"] == "RU"
+        assert p["fide_rating"] == 2812
+
 
 class TestLichessSearch:
+    @patch("lookup.lichess.requests.get")
+    def test_uses_player_autocomplete_endpoint(self, mock_get):
+        # Lichess renamed /api/users/autocomplete -> /api/player/autocomplete;
+        # hitting the old path 404s and silently breaks all Lichess matching.
+        mock_get.return_value = _mock_response(json_data=LICHESS_AUTOCOMPLETE)
+        search("kasparov")
+        called_url = mock_get.call_args[0][0]
+        assert "/player/autocomplete" in called_url
+        assert "/users/autocomplete" not in called_url
+
+    @patch("lookup.lichess.requests.get")
+    def test_strips_comma_from_last_first_name(self, mock_get):
+        # The autocomplete endpoint 400s on a literal comma in the term.
+        mock_get.return_value = _mock_response(json_data=LICHESS_AUTOCOMPLETE)
+        search("Kasparov, Garry")
+        called_params = mock_get.call_args.kwargs["params"]
+        assert "," not in called_params["term"]
+        assert called_params["term"] == "Kasparov Garry"
+
     @patch("lookup.lichess.requests.get")
     def test_returns_candidates(self, mock_get):
         mock_get.return_value = _mock_response(json_data=LICHESS_AUTOCOMPLETE)
@@ -141,6 +178,66 @@ class TestLichessGetProfile:
         profile = get_profile("gmkasparov")
         assert profile["username"] == "gmkasparov"
         assert profile["ratings"]["classical"] == 2800
+
+
+class TestLichessGetStudies:
+    @patch("lookup.lichess.requests.get")
+    def test_parses_ndjson_list(self, mock_get):
+        ndjson = '{"id":"xduT8rax","name":"Brasil"}\n{"id":"abcd1234","name":"Prep"}\n'
+        mock_get.return_value = _mock_response(text_data=ndjson)
+        studies = get_studies("nihalsarin")
+        assert len(studies) == 2
+        assert studies[0]["id"] == "xduT8rax"
+
+    @patch("lookup.lichess.requests.get")
+    def test_respects_max(self, mock_get):
+        ndjson = '{"id":"a","name":"A"}\n{"id":"b","name":"B"}\n{"id":"c","name":"C"}\n'
+        mock_get.return_value = _mock_response(text_data=ndjson)
+        studies = get_studies("someuser", max=1)
+        assert len(studies) == 1
+
+    @patch("lookup.lichess.requests.get")
+    def test_empty_studies(self, mock_get):
+        mock_get.return_value = _mock_response(text_data="")
+        assert get_studies("nobody") == []
+
+
+class TestLichessGetStudyPgn:
+    @patch("lookup.lichess.requests.get")
+    def test_returns_pgn_text(self, mock_get):
+        pgn = '[Event "Study: Chapter 1"]\n[White "Kasparov, Garry"]\n\n1. e4 *'
+        mock_get.return_value = _mock_response(text_data=pgn)
+        result = get_study_pgn("xduT8rax")
+        assert "Kasparov, Garry" in result
+
+
+class TestLichessFindUsernamesViaSearch:
+    @patch("lookup.websearch.search")
+    def test_extracts_usernames_from_profile_urls(self, mock_search):
+        # Real-world case: Magnus Carlsen's actual Lichess account is the
+        # pseudonymous "DrNykterstein" — unrelated to his name and
+        # unfindable by /player/autocomplete searching "Magnus Carlsen".
+        mock_search.return_value = [
+            {"title": "Magnus Carlsen", "url": "https://lichess.org/@/DrNykterstein",
+             "description": "..."},
+            {"title": "Unrelated", "url": "https://example.com", "description": "..."},
+        ]
+        usernames = lichess_find_usernames_via_search("Carlsen, Magnus", "fake-key")
+        assert usernames == ["DrNykterstein"]
+
+    @patch("lookup.websearch.search")
+    def test_dedupes_case_insensitively(self, mock_search):
+        mock_search.return_value = [
+            {"title": "a", "url": "https://lichess.org/@/SomeHandle", "description": ""},
+            {"title": "b", "url": "https://lichess.org/@/somehandle", "description": ""},
+        ]
+        usernames = lichess_find_usernames_via_search("Carlsen, Magnus", "fake-key")
+        assert len(usernames) == 1
+
+    @patch("lookup.websearch.search")
+    def test_no_matching_results(self, mock_search):
+        mock_search.return_value = [{"title": "a", "url": "https://example.com", "description": ""}]
+        assert lichess_find_usernames_via_search("Nobody, N", "fake-key") == []
 
 
 class TestLichessGetGames:
@@ -262,3 +359,29 @@ class TestChesscomFindProfile:
     def test_returns_none_when_no_match(self, mock_get_profile):
         mock_get_profile.side_effect = __import__("requests").HTTPError()
         assert find_profile("Zzz, Qqq") is None
+
+
+class TestChesscomFindUsernamesViaSearch:
+    @patch("lookup.websearch.search")
+    def test_extracts_usernames_from_member_urls(self, mock_search):
+        mock_search.return_value = [
+            {"title": "Pierre Delacroix - Chess.com",
+             "url": "https://www.chess.com/member/beaumontchess_fr", "description": "..."},
+            {"title": "Unrelated", "url": "https://example.com", "description": "..."},
+        ]
+        usernames = find_usernames_via_search("Delacroix, Pierre", "fake-key")
+        assert usernames == ["beaumontchess_fr"]
+
+    @patch("lookup.websearch.search")
+    def test_dedupes_usernames(self, mock_search):
+        mock_search.return_value = [
+            {"title": "a", "url": "https://www.chess.com/member/beaumontchess_fr", "description": ""},
+            {"title": "b", "url": "https://www.chess.com/member/BeaumontChess_FR", "description": ""},
+        ]
+        usernames = find_usernames_via_search("Delacroix, Pierre", "fake-key")
+        assert len(usernames) == 1
+
+    @patch("lookup.websearch.search")
+    def test_no_matching_results(self, mock_search):
+        mock_search.return_value = [{"title": "a", "url": "https://example.com", "description": ""}]
+        assert find_usernames_via_search("Nobody, N", "fake-key") == []

@@ -15,6 +15,7 @@ API used (no auth required):
   https://api.chess.com/pub/player/{username}/games/{y}/{m} — monthly archives
 """
 
+import re
 import sys
 import json
 import argparse
@@ -77,6 +78,29 @@ def find_profile(name: str) -> dict | None:
         except requests.HTTPError:
             continue
     return None
+
+
+_MEMBER_URL_RE = re.compile(r"chess\.com/member/([A-Za-z0-9_-]+)", re.IGNORECASE)
+
+
+def find_usernames_via_search(name: str, api_key: str, max_results: int = 5) -> list[str]:
+    """
+    Search the web for the player's chess.com profile. Catches personalized
+    handles no mechanical guess_usernames() pattern could ever produce —
+    e.g. an account like "beaumontchess_fr" for "Delacroix, Pierre" (a
+    blend of the surname, "chess", and a country code, findable by search
+    but not by any first/last-name concatenation).
+    """
+    from lookup.websearch import search as web_search
+    results = web_search(f'"{name}" chess.com/member', api_key, count=max_results)
+    usernames: list[str] = []
+    seen: set[str] = set()
+    for r in results:
+        m = _MEMBER_URL_RE.search(r.get("url", ""))
+        if m and m.group(1).lower() not in seen:
+            seen.add(m.group(1).lower())
+            usernames.append(m.group(1))
+    return usernames
 
 
 def get_games(username: str, months: int = 3) -> list[dict]:

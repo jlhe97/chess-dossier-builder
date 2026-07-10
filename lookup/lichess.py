@@ -8,11 +8,12 @@ Usage:
   python -m lookup.lichess games thibault --max 20 --output json
 
 API used (no auth required):
-  https://lichess.org/api/users/autocomplete  — name → username candidates
+  https://lichess.org/api/player/autocomplete  — name → username candidates (username-only, no real-name search)
   https://lichess.org/api/user/{username}     — profile + ratings
   https://lichess.org/api/games/user/{username} — PGN/ndjson game stream
 """
 
+import re
 import sys
 import json
 import argparse
@@ -40,7 +41,10 @@ def search(name: str, max_results: int = 5) -> list[dict]:
     Search for Lichess users by display name or username.
     Returns a list of candidate profiles (id, username, title, ratings).
     """
-    resp = _get("/users/autocomplete", params={"term": name, "object": "true"})
+    # The autocomplete endpoint 400s on punctuation like the comma in
+    # "Last, First" — collapse to plain whitespace-separated words.
+    term = " ".join(name.replace(",", " ").split())
+    resp = _get("/player/autocomplete", params={"term": term, "object": "true"})
     data = resp.json()
     users = data if isinstance(data, list) else data.get("result", [])
     return [_slim_profile(u) for u in users[:max_results]]
@@ -50,6 +54,42 @@ def get_profile(username: str) -> dict:
     """Fetch full profile for a known username."""
     resp = _get(f"/user/{username}")
     return _slim_profile(resp.json())
+
+
+_PROFILE_URL_RE = re.compile(r"lichess\.org/@/([A-Za-z0-9_-]+)", re.IGNORECASE)
+
+
+def find_usernames_via_search(name: str, api_key: str, max_results: int = 5) -> list[str]:
+    """
+    Search the web for the player's Lichess profile. /player/autocomplete
+    only matches on username — a player whose Lichess handle has nothing
+    to do with their real name (and who filled in a real-name field) is
+    invisible to it, but findable the way a human would: searching their
+    name alongside "lichess.org".
+    """
+    from lookup.websearch import search as web_search
+    results = web_search(f'"{name}" lichess.org/@', api_key, count=max_results)
+    usernames: list[str] = []
+    seen: set[str] = set()
+    for r in results:
+        m = _PROFILE_URL_RE.search(r.get("url", ""))
+        if m and m.group(1).lower() not in seen:
+            seen.add(m.group(1).lower())
+            usernames.append(m.group(1))
+    return usernames
+
+
+def get_studies(username: str, max: int = 20) -> list[dict]:
+    """List public studies owned by `username`. Each dict has at least 'id' and 'name'."""
+    resp = _get(f"/study/by/{username}", accept="application/x-ndjson")
+    studies = [json.loads(line) for line in resp.text.splitlines() if line.strip()]
+    return studies[:max]
+
+
+def get_study_pgn(study_id: str) -> str:
+    """Export all chapters of a study as PGN (one game per chapter)."""
+    resp = _get(f"/study/{study_id}.pgn", accept="application/x-chess-pgn")
+    return resp.text
 
 
 def get_games(username: str, max: int = 50,
@@ -91,6 +131,7 @@ def games_as_pgn(username: str, max: int = 50,
 
 def _slim_profile(data: dict) -> dict:
     perfs = data.get("perfs", {})
+    profile = data.get("profile") or {}
     return {
         "username": data.get("id") or data.get("username", ""),
         "display_name": data.get("username", ""),
@@ -101,6 +142,12 @@ def _slim_profile(data: dict) -> dict:
             if k in perfs and "rating" in perfs[k]
         },
         "url": f"https://lichess.org/@/{data.get('id') or data.get('username', '')}",
+        # Only present on a full /api/user/{username} profile, not on
+        # /player/autocomplete search results — and even then only if
+        # the account owner filled them in.
+        "real_name": profile.get("realName"),
+        "country": profile.get("flag"),
+        "fide_rating": profile.get("fideRating"),
     }
 
 
