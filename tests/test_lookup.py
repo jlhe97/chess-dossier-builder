@@ -128,6 +128,13 @@ class TestLichessSlimProfile:
         assert p["country"] == "RU"
         assert p["fide_rating"] == 2812
 
+    def test_extracts_games_count(self):
+        data = {**LICHESS_USER, "count": {"all": 10450, "rated": 10435}}
+        assert _slim_profile(data)["games_count"] == 10450
+
+    def test_missing_count_omitted(self):
+        assert _slim_profile(LICHESS_USER)["games_count"] is None
+
 
 class TestLichessSearch:
     @patch("lookup.lichess.requests.get")
@@ -239,6 +246,17 @@ class TestLichessFindUsernamesViaSearch:
         mock_search.return_value = [{"title": "a", "url": "https://example.com", "description": ""}]
         assert lichess_find_usernames_via_search("Nobody, N", "fake-key") == []
 
+    @patch("lookup.websearch.search")
+    def test_query_uses_natural_name_order_unquoted_bare_domain(self, mock_search):
+        # Confirmed empirically against a real unresolved case: exact-phrase
+        # quoting a "Last, First" name, or appending a path fragment like
+        # "/@", each independently kill recall on real search backends —
+        # the query must be natural-order, unquoted, bare-domain.
+        mock_search.return_value = []
+        lichess_find_usernames_via_search("Kowalski, Marek Antoni", "http://localhost:8080")
+        query = mock_search.call_args[0][0]
+        assert query == "Marek Antoni Kowalski lichess.org"
+
 
 class TestLichessGetGames:
     @patch("lookup.lichess.requests.get")
@@ -256,6 +274,20 @@ class TestLichessGetGames:
         mock_get.return_value = _mock_response(text_data=pgn)
         result = games_as_pgn("gmkasparov", max=1)
         assert "1. e4" in result
+
+    @patch("lookup.lichess.requests.get")
+    @patch("lookup.lichess.time.sleep")
+    def test_since_param_passed_through(self, mock_sleep, mock_get):
+        mock_get.return_value = _mock_response(text_data="[Event \"?\"]\n\n1. e4 *")
+        games_as_pgn("gmkasparov", max=300, since=1700000000000)
+        assert mock_get.call_args.kwargs["params"]["since"] == 1700000000000
+
+    @patch("lookup.lichess.requests.get")
+    @patch("lookup.lichess.time.sleep")
+    def test_since_omitted_when_not_given(self, mock_sleep, mock_get):
+        mock_get.return_value = _mock_response(text_data="[Event \"?\"]\n\n1. e4 *")
+        games_as_pgn("gmkasparov", max=1)
+        assert "since" not in mock_get.call_args.kwargs["params"]
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +324,29 @@ class TestChesscomSlimProfile:
     def test_empty_stats(self):
         p = cc_slim_profile("user", CHESSCOM_PROFILE, {})
         assert p["ratings"] == {}
+
+    def test_extracts_real_name_when_set(self):
+        p = cc_slim_profile("MagnusCarlsen", CHESSCOM_PROFILE, CHESSCOM_STATS)
+        assert p["real_name"] == "Magnus Carlsen"
+
+    def test_real_name_none_when_unset(self):
+        profile = {k: v for k, v in CHESSCOM_PROFILE.items() if k != "name"}
+        p = cc_slim_profile("MagnusCarlsen", profile, CHESSCOM_STATS)
+        assert p["real_name"] is None
+        # display_name still falls back to the username, unlike real_name
+        assert p["display_name"] == "MagnusCarlsen"
+
+    def test_sums_games_count_across_time_controls(self):
+        stats = {
+            "chess_rapid": {"record": {"win": 28, "loss": 11, "draw": 3}},
+            "chess_bullet": {"record": {"win": 97, "loss": 69, "draw": 7}},
+        }
+        p = cc_slim_profile("user", CHESSCOM_PROFILE, stats)
+        assert p["games_count"] == 28 + 11 + 3 + 97 + 69 + 7
+
+    def test_games_count_none_when_no_records(self):
+        p = cc_slim_profile("MagnusCarlsen", CHESSCOM_PROFILE, CHESSCOM_STATS)
+        assert p["games_count"] is None
 
 
 class TestChesscomGetProfile:
@@ -385,3 +440,14 @@ class TestChesscomFindUsernamesViaSearch:
     def test_no_matching_results(self, mock_search):
         mock_search.return_value = [{"title": "a", "url": "https://example.com", "description": ""}]
         assert find_usernames_via_search("Nobody, N", "fake-key") == []
+
+    @patch("lookup.websearch.search")
+    def test_query_uses_natural_name_order_unquoted_bare_domain(self, mock_search):
+        # Confirmed empirically against a real unresolved case: exact-phrase
+        # quoting a "Last, First" name, or appending a path fragment like
+        # "/member", each independently kill recall on real search backends
+        # — the query must be natural-order, unquoted, bare-domain.
+        mock_search.return_value = []
+        find_usernames_via_search("Kowalski, Marek Antoni", "http://localhost:8080")
+        query = mock_search.call_args[0][0]
+        assert query == "Marek Antoni Kowalski chess.com"

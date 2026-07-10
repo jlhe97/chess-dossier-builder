@@ -49,6 +49,14 @@ def guess_usernames(name: str) -> list[str]:
         parts = name.split()
         first, last = parts[0], parts[-1]
 
+    # A "Last, First Middle" entry keeps the whole "First Middle" string in
+    # `first` after the comma-split above — only the given (first) name is
+    # part of a plausible username, so drop any middle name(s) here. Without
+    # this, every guess embeds a literal space (e.g. "john derekheinichen")
+    # and 404s, silently breaking chess.com matching for anyone with a
+    # middle name.
+    first = first.split()[0] if first.split() else first
+
     f, l = first.lower(), last.lower()
     return [
         f"{f}{l}", f"{l}{f}", f"{f}_{l}", f"{l}_{f}",
@@ -83,16 +91,34 @@ def find_profile(name: str) -> dict | None:
 _MEMBER_URL_RE = re.compile(r"chess\.com/member/([A-Za-z0-9_-]+)", re.IGNORECASE)
 
 
-def find_usernames_via_search(name: str, api_key: str, max_results: int = 5) -> list[str]:
+def _natural_name_order(name: str) -> str:
+    """'Last, First Middle' -> 'First Middle Last' — real web pages never
+    write a name in tournament-entry-list comma order."""
+    if "," not in name:
+        return name
+    last, _, first = name.partition(",")
+    return f"{first.strip()} {last.strip()}"
+
+
+def find_usernames_via_search(name: str, searxng_url: str, max_results: int = 5) -> list[str]:
     """
     Search the web for the player's chess.com profile. Catches personalized
     handles no mechanical guess_usernames() pattern could ever produce —
     e.g. an account like "beaumontchess_fr" for "Delacroix, Pierre" (a
     blend of the surname, "chess", and a country code, findable by search
     but not by any first/last-name concatenation).
+
+    The query is deliberately *not* exact-phrase-quoted, and uses a bare
+    domain rather than a path fragment like "chess.com/member" — confirmed
+    empirically (against a real unresolved case) that either one alone
+    silently kills recall on real search backends: quoting requires the
+    crawled page to contain that literal substring, which a profile page's
+    name field rarely does verbatim, and appending a path fragment gets
+    tokenized as unrelated keyword noise rather than a URL hint.
     """
     from lookup.websearch import search as web_search
-    results = web_search(f'"{name}" chess.com/member', api_key, count=max_results)
+    query_name = _natural_name_order(name)
+    results = web_search(f'{query_name} chess.com', searxng_url, count=max_results)
     usernames: list[str] = []
     seen: set[str] = set()
     for r in results:
@@ -150,13 +176,28 @@ def _slim_profile(username: str, profile: dict, stats: dict) -> dict:
         if key in stats and "last" in stats[key]:
             ratings[label] = stats[key]["last"]["rating"]
 
+    # Sum win/loss/draw across every time control in `stats` (daily, rapid,
+    # blitz, bullet, chess960 variants, ...) for a total-games figure, used
+    # as a confidence signal — chess.com has no single "career games" field.
+    games_count = sum(
+        r.get("win", 0) + r.get("loss", 0) + r.get("draw", 0)
+        for v in stats.values() if isinstance(v, dict)
+        for r in [v.get("record", {})]
+    ) or None
+
     return {
         "username": username,
         "display_name": profile.get("name") or profile.get("username", username),
+        # Unlike display_name, not defaulted to the username — a genuine
+        # real name is much stronger match evidence than a guessed handle
+        # that happens to resemble the search name (which display_name
+        # would if "name" were unset), so keep them distinguishable.
+        "real_name": profile.get("name"),
         "title": profile.get("title"),
         "ratings": ratings,
         "url": profile.get("url", f"https://www.chess.com/member/{username}"),
         "country": profile.get("country", "").split("/")[-1],
+        "games_count": games_count,
     }
 
 

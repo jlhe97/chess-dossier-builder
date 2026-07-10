@@ -59,16 +59,34 @@ def get_profile(username: str) -> dict:
 _PROFILE_URL_RE = re.compile(r"lichess\.org/@/([A-Za-z0-9_-]+)", re.IGNORECASE)
 
 
-def find_usernames_via_search(name: str, api_key: str, max_results: int = 5) -> list[str]:
+def _natural_name_order(name: str) -> str:
+    """'Last, First Middle' -> 'First Middle Last' — real web pages never
+    write a name in tournament-entry-list comma order."""
+    if "," not in name:
+        return name
+    last, _, first = name.partition(",")
+    return f"{first.strip()} {last.strip()}"
+
+
+def find_usernames_via_search(name: str, searxng_url: str, max_results: int = 5) -> list[str]:
     """
     Search the web for the player's Lichess profile. /player/autocomplete
     only matches on username — a player whose Lichess handle has nothing
     to do with their real name (and who filled in a real-name field) is
     invisible to it, but findable the way a human would: searching their
     name alongside "lichess.org".
+
+    The query is deliberately *not* exact-phrase-quoted, and uses a bare
+    domain rather than a path fragment like "lichess.org/@" — confirmed
+    empirically (against a real unresolved case) that either one alone
+    silently kills recall on real search backends: quoting requires the
+    crawled page to contain that literal substring, which a profile page's
+    name field rarely does verbatim, and appending a path fragment gets
+    tokenized as unrelated keyword noise rather than a URL hint.
     """
     from lookup.websearch import search as web_search
-    results = web_search(f'"{name}" lichess.org/@', api_key, count=max_results)
+    query_name = _natural_name_order(name)
+    results = web_search(f'{query_name} lichess.org', searxng_url, count=max_results)
     usernames: list[str] = []
     seen: set[str] = set()
     for r in results:
@@ -93,16 +111,22 @@ def get_study_pgn(study_id: str) -> str:
 
 
 def get_games(username: str, max: int = 50,
-              perf_types: str = "classical,rapid,blitz") -> list[dict]:
+              perf_types: str = "classical,rapid,blitz",
+              since: int | None = None) -> list[dict]:
     """
-    Fetch up to `max` recent games for a Lichess user.
+    Fetch up to `max` recent games for a Lichess user, optionally only
+    those since `since` (epoch milliseconds) — used to pull a genuine
+    calendar-year window rather than being bounded by whatever `max` is.
     Returns a list of dicts with PGN and metadata.
     """
     time.sleep(_RATE_DELAY)
+    params = {"max": max, "perfType": perf_types, "clocks": "false", "evals": "false"}
+    if since is not None:
+        params["since"] = since
     resp = requests.get(
         f"{_BASE}/games/user/{username}",
         headers={**_HEADERS, "Accept": "application/x-ndjson"},
-        params={"max": max, "perfType": perf_types, "clocks": "false", "evals": "false"},
+        params=params,
         timeout=30,
         stream=True,
     )
@@ -116,13 +140,17 @@ def get_games(username: str, max: int = 50,
 
 
 def games_as_pgn(username: str, max: int = 50,
-                 perf_types: str = "classical,rapid,blitz") -> str:
-    """Fetch games and return as a single PGN string."""
+                 perf_types: str = "classical,rapid,blitz",
+                 since: int | None = None) -> str:
+    """Fetch games and return as a single PGN string. See get_games() for `since`."""
     time.sleep(_RATE_DELAY)
+    params = {"max": max, "perfType": perf_types, "clocks": "false", "evals": "false"}
+    if since is not None:
+        params["since"] = since
     resp = requests.get(
         f"{_BASE}/games/user/{username}",
         headers={**_HEADERS, "Accept": "application/x-chess-pgn"},
-        params={"max": max, "perfType": perf_types, "clocks": "false", "evals": "false"},
+        params=params,
         timeout=30,
     )
     resp.raise_for_status()
@@ -148,6 +176,11 @@ def _slim_profile(data: dict) -> dict:
         "real_name": profile.get("realName"),
         "country": profile.get("flag"),
         "fide_rating": profile.get("fideRating"),
+        # Also only on the full profile ("count" is absent from autocomplete
+        # results) — total games played, used as a confidence signal: an
+        # account with almost no games is weak evidence either way, no
+        # matter how well the name matches.
+        "games_count": data.get("count", {}).get("all"),
     }
 
 
