@@ -86,8 +86,11 @@ def render_markdown(dossier: dict) -> str:
                 pct = round(p["match_score"] * 100)
                 reasons = "; ".join(p.get("match_reasons", []))
                 match = f" *(match confidence {pct}%: {reasons})*"
+            recent = ""
+            if p.get("recent_games_url"):
+                recent = f" · [Recent games ({p.get('recent_games_count', 0)})]({p['recent_games_url']})"
             lines.append(f"- **{site}**: [{title}{p['display_name']}]({p['url']})"
-                         + (f" — {ratings}" if ratings else "") + flag + match)
+                         + (f" — {ratings}" if ratings else "") + flag + match + recent)
         lines.append("")
 
     # --- Overview ---
@@ -239,10 +242,14 @@ def _html_player_section(player, stats, openings, profiles, generated, anchor=No
                 pct = round(p["match_score"] * 100)
                 reasons = _esc("; ".join(p.get("match_reasons", [])))
                 match = f" <span class='match' title='{reasons}'>({pct}% match)</span>"
+            recent = ""
+            if p.get("recent_games_url"):
+                recent = (f" · <a href='{_esc(p['recent_games_url'])}'>"
+                         f"Recent games ({p.get('recent_games_count', 0)})</a>")
             items.append(
                 f"<li><strong>{site}</strong>: "
                 f"<a href='{p['url']}'>{_esc(title)}{_esc(p['display_name'])}</a>"
-                f"{rat_str}{warn}{match}</li>"
+                f"{rat_str}{warn}{match}{recent}</li>"
             )
         prof_html = f"<h2>Online Profiles</h2><ul class='profiles'>{''.join(items)}</ul>"
 
