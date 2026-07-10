@@ -314,10 +314,16 @@ python -m pipeline.runner Challenge34
 # By full URL (site auto-detected)
 python -m pipeline.runner "https://chessaction.com/tournaments/advance_entry_list.php?tid=nKGioA=="
 
+# Pull historical games from a local MegaDatabase index too
+python -m pipeline.runner Challenge34 --megabase megabase.db
+
 # Custom output directory and game limits
 python -m pipeline.runner Challenge34 --output-dir ./dossiers --max-games 30 --chesscom-months 6
 
-# JSON output (no combined.md)
+# Skip your own entry, or anyone else's, by (partial) name
+python -m pipeline.runner Challenge34 --exclude "Smith, John"
+
+# JSON output (no combined file, no local game-view pages)
 python -m pipeline.runner Challenge34 --format json
 ```
 
@@ -325,26 +331,49 @@ python -m pipeline.runner Challenge34 --format json
 ```
 python -m pipeline.runner <tournament>
     [--site kingregistration|chessaction]
-    [--output-dir DIR]       default: dossiers/
-    [--max-games N]          Lichess games to fetch per player (default: 50)
-    [--chesscom-months N]    chess.com history window in months (default: 3)
-    [--depth N]              opening depth in half-moves (default: 6)
-    [--top N]                top N opening lines per colour (default: 8)
-    [--format markdown|json] output format (default: markdown)
+    [--output-dir DIR]        default: dossiers/
+    [--max-games N]           Lichess games to fetch per player (default: 50)
+    [--chesscom-months N]     chess.com history window in months (default: 3)
+    [--megabase DB]           SQLite megabase index to pull historical games from
+    [--megabase-limit N]      cap games pulled from the megabase per player (default: no limit)
+    [--no-lichess-studies]    skip pulling games from the opponent's own public Lichess studies
+    [--search-api-key KEY]    Brave Search API key — enables finding opponent games in Lichess
+                               broadcasts, plus Lichess/chess.com accounts with a personalized
+                               handle no guess could find (default: $BRAVE_API_KEY; omit to skip)
+    [--depth N]               opening depth in half-moves (default: 6)
+    [--top N]                 top N opening lines per colour (default: 8)
+    [--format markdown|html|json]  output format (default: html)
+    [--exclude NAME]          skip players whose name contains this text (repeatable)
 ```
 
 **Output**
 ```
 dossiers/
-  smith_john.md     ← one file per opponent
-  doe_jane.md
-  combined.md       ← all dossiers concatenated (markdown mode only)
+  smith_john.html    ← one file per opponent
+  doe_jane.html
+  combined.html       ← all dossiers with nav (html/markdown modes only)
+  games/
+    smith_john/       ← one games-browser page per player, for games with no
+      index.html          public URL (i.e. from the megabase — Lichess/chess.com/
+                           broadcast games link straight to the real game instead)
 ```
 
-Low-confidence name→handle matches are flagged in the report:
+Every opening-table row links out to the underlying games. A real Lichess/chess.com
+game already has a public URL; anything else (mainly megabase games) links into that
+player's `games/<slug>/index.html` — a game list on the left, and clicking one loads
+it onto a board on the right that you step through with Prev/Next, arrow keys, or by
+clicking any move. Self-contained, no external JS — pieces are the same "Cburnett" SVG
+set Lichess's default board theme uses (bundled with `python-chess`), not font glyphs.
+
+Name→handle matches are scored on more than raw name similarity — rating closeness to
+the tournament entry (and FIDE rating, when a Lichess profile has one linked) and
+account country all factor in, with the reasoning shown next to each match. When a
+Brave Search API key is set, an account with a personalized handle unrelated to the
+player's name (unguessable and unfindable by Lichess's own username-only search) can
+still be found and scored the same way, via its linked real name instead:
 ```
 ## Online Profiles
-- **Lichess**: [xyz99](https://lichess.org/@/xyz99) ⚠️ *low-confidence match*
+- **Lichess**: [xyz99](https://lichess.org/@/xyz99) (34% match) ⚠️ *low-confidence match*
 ```
 
 ### Python API
@@ -352,7 +381,7 @@ Low-confidence name→handle matches are flagged in the report:
 ```python
 from pipeline.runner import run_pipeline
 
-paths = run_pipeline("Challenge34", output_dir="dossiers", max_games=50)
+paths = run_pipeline("Challenge34", output_dir="dossiers", max_games=50, megabase="megabase.db")
 # returns list of Path objects for written files
 ```
 
@@ -365,10 +394,18 @@ paths = run_pipeline("Challenge34", output_dir="dossiers", max_games=50)
 - [x] Step 5 — Generate per-opponent dossier report
 - [x] Step 6 — End-to-end pipeline
   - Single command: tournament URL → dossiers for every opponent
-  - Name → handle resolver: Lichess autocomplete + chess.com guesser, pick best candidate automatically; flag low-confidence matches in the report
-  - Fetches games from Lichess and chess.com and merges into a single dossier
-  - Output: HTML per opponent + `combined.html` (colour-coded, print-ready)
-  - [ ] MegaDatabase integration (once SQLite index is built)
+  - Name → handle resolver scores candidates on name/handle similarity, rating
+    closeness (online and/or FIDE), and account country; picks the best match
+    and shows the reasoning, not just a bare confidence label — with a Brave
+    Search API key, it can also find accounts with a personalized handle no
+    guess or username-only search would ever surface
+  - Pulls games from Lichess, chess.com, the local MegaDatabase, the opponent's
+    own public Lichess studies, and (with a Brave Search API key) Lichess
+    broadcasts they appeared in
+  - Clickable links from every opening line to the actual game — a real
+    Lichess/chess.com/broadcast URL, or a self-contained interactive replay
+    board (Lichess's own SVG piece set) for anything without one
+  - Output: folder of HTML (or Markdown/JSON) files, one per opponent, + combined view
   - [ ] Combined PDF output
 - [ ] Step 7 — Pre-game preparation agent
   - `agent/coach.py` calls Claude (Anthropic SDK) with the structured dossier dict as input
