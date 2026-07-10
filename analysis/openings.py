@@ -10,6 +10,7 @@ Usage:
 """
 
 import io
+import re
 import sys
 import json
 import argparse
@@ -17,12 +18,49 @@ from collections import defaultdict
 
 import chess.pgn
 
+from pgnutil import split_pgn_games
+
 
 def _parse_game(pgn_text: str) -> chess.pgn.Game | None:
     try:
         return chess.pgn.read_game(io.StringIO(pgn_text))
     except Exception:
         return None
+
+
+def _tokens(name: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", name.lower()))
+
+
+def _name_matches(player: str, header_name: str) -> bool:
+    """
+    True if every word in `player` appears somewhere in `header_name`.
+
+    Token-based rather than plain substring so a truncated/compound
+    surname in the source name (e.g. tournament entry "Lagrave, Maxime"
+    vs. PGN header "Vachier-Lagrave, Maxime") still matches.
+    """
+    player_tokens = _tokens(player)
+    if not player_tokens:
+        return False
+    return player_tokens <= _tokens(header_name)
+
+
+def _game_url(headers) -> str | None:
+    """
+    Best-effort link to view a game. Checks, in order: a custom GameURL
+    header (used for locally-generated views of games with no public
+    page, e.g. from the megabase), then the standard Link/Site tags
+    lichess and chess.com PGN exports populate with the game's URL.
+    """
+    gu = headers.get("GameURL", "")
+    if gu:
+        return gu
+    for key in ("Link", "Site"):
+        val = headers.get(key, "")
+        if val.startswith("http"):
+            return val
+    return None
 
 
 def _opening_line(game: chess.pgn.Game, depth: int) -> str:
@@ -52,9 +90,8 @@ def _result_for_player(game: chess.pgn.Game, player: str) -> str:
     white = headers.get("White", "")
     black = headers.get("Black", "")
 
-    player_l = player.lower()
-    is_white = player_l in white.lower()
-    is_black = player_l in black.lower()
+    is_white = _name_matches(player, white)
+    is_black = _name_matches(player, black)
 
     if result == "1-0":
         if is_white:   return "win"
@@ -67,11 +104,15 @@ def _result_for_player(game: chess.pgn.Game, player: str) -> str:
     return "unknown"
 
 
+_MAX_GAMES_PER_LINE = 20
+
+
 def _tally(records: dict) -> dict:
     """Sort opening records by count and compute win_pct."""
     rows = []
     for line, r in records.items():
         total = r["wins"] + r["draws"] + r["losses"]
+        games = sorted(r["games"], key=lambda g: g.get("date") or "", reverse=True)
         rows.append({
             "line": line,
             "count": total,
@@ -79,6 +120,7 @@ def _tally(records: dict) -> dict:
             "draws": r["draws"],
             "losses": r["losses"],
             "win_pct": round(100 * r["wins"] / total, 1) if total else 0.0,
+            "games": games[:_MAX_GAMES_PER_LINE],
         })
     return sorted(rows, key=lambda x: x["count"], reverse=True)
 
@@ -95,10 +137,8 @@ def analyse_openings(pgn_strings: list[str], player: str,
       }
     Sorted by frequency. Pass top > 0 to limit to N lines per colour.
     """
-    white_lines: dict[str, dict] = defaultdict(lambda: {"wins": 0, "draws": 0, "losses": 0})
-    black_lines: dict[str, dict] = defaultdict(lambda: {"wins": 0, "draws": 0, "losses": 0})
-
-    player_l = player.lower()
+    white_lines: dict[str, dict] = defaultdict(lambda: {"wins": 0, "draws": 0, "losses": 0, "games": []})
+    black_lines: dict[str, dict] = defaultdict(lambda: {"wins": 0, "draws": 0, "losses": 0, "games": []})
 
     for pgn_text in pgn_strings:
         game = _parse_game(pgn_text)
@@ -106,11 +146,11 @@ def analyse_openings(pgn_strings: list[str], player: str,
             continue
 
         headers = game.headers
-        white = headers.get("White", "").lower()
-        black = headers.get("Black", "").lower()
+        white = headers.get("White", "")
+        black = headers.get("Black", "")
 
-        is_white = player_l in white
-        is_black = player_l in black
+        is_white = _name_matches(player, white)
+        is_black = _name_matches(player, black)
         if not is_white and not is_black:
             continue
 
@@ -122,6 +162,12 @@ def analyse_openings(pgn_strings: list[str], player: str,
         key = {"win": "wins", "draw": "draws", "loss": "losses"}[result]
         bucket = white_lines if is_white else black_lines
         bucket[line][key] += 1
+        bucket[line]["games"].append({
+            "url": _game_url(headers),
+            "date": headers.get("Date"),
+            "opponent": black if is_white else white,
+            "result": result,
+        })
 
     as_white = _tally(white_lines)
     as_black = _tally(black_lines)
@@ -146,9 +192,7 @@ def main() -> None:
     with open(args.pgn_file, encoding="utf-8", errors="replace") as fh:
         content = fh.read()
 
-    # Split multi-game PGN by blank line before each [Event tag
-    import re
-    raw_games = re.split(r"\n(?=\[)", content.strip())
+    raw_games = split_pgn_games(content)
     print(f"Parsing {len(raw_games)} game(s)…", file=sys.stderr)
 
     result = analyse_openings(raw_games, args.player, depth=args.depth, top=args.top)

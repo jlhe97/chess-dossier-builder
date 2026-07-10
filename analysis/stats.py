@@ -9,11 +9,11 @@ import io
 import sys
 import json
 import argparse
-import re
 
 import chess.pgn
 
-from analysis.openings import _parse_game, _result_for_player, analyse_openings
+from pgnutil import split_pgn_games
+from analysis.openings import _parse_game, _result_for_player, _name_matches, analyse_openings
 
 
 def _game_length(game: chess.pgn.Game) -> int:
@@ -36,8 +36,6 @@ def analyse_stats(pgn_strings: list[str], player: str) -> dict:
         "vs_d4": [...],   # top opening lines as Black vs 1. d4
       }
     """
-    player_l = player.lower()
-
     buckets = {
         "white": {"wins": 0, "draws": 0, "losses": 0},
         "black": {"wins": 0, "draws": 0, "losses": 0},
@@ -51,11 +49,11 @@ def analyse_stats(pgn_strings: list[str], player: str) -> dict:
             continue
 
         headers = game.headers
-        white = headers.get("White", "").lower()
-        black = headers.get("Black", "").lower()
+        white = headers.get("White", "")
+        black = headers.get("Black", "")
 
-        is_white = player_l in white
-        is_black = player_l in black
+        is_white = _name_matches(player, white)
+        is_black = _name_matches(player, black)
         if not is_white and not is_black:
             continue
 
@@ -129,7 +127,7 @@ def main() -> None:
     with open(args.pgn_file, encoding="utf-8", errors="replace") as fh:
         content = fh.read()
 
-    raw_games = re.split(r"\n(?=\[)", content.strip())
+    raw_games = split_pgn_games(content)
     print(f"Parsing {len(raw_games)} game(s)…", file=sys.stderr)
 
     result = analyse_stats(raw_games, args.player)

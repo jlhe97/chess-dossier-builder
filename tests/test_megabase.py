@@ -51,6 +51,72 @@ PGN_PARTIAL_NAME = textwrap.dedent("""\
     1. e4 e5 1/2-1/2
 """)
 
+PGN_SUBSTRING_FALSE_POSITIVE = textwrap.dedent("""\
+    [Event "Open"]
+    [White "Yamaraj, Ivanova"]
+    [Black "Someone, Else"]
+    [Date "2023.01.01"]
+    [Result "1-0"]
+
+    1. e4 e5 1-0
+
+    [Event "Open"]
+    [White "Amara, Ivan"]
+    [Black "Someone, Else"]
+    [Date "2023.01.02"]
+    [Result "0-1"]
+
+    1. d4 d5 0-1
+""")
+
+PGN_COMPOUND_SURNAME = textwrap.dedent("""\
+    [Event "Open"]
+    [White "Opponent, Someone"]
+    [Black "Delacroix Beaumont, Pierre"]
+    [Date "2023.11.10"]
+    [Result "1/2-1/2"]
+
+    1. e4 e5 1/2-1/2
+
+    [Event "Open"]
+    [White "Delacroix, Marc"]
+    [Black "Someone, Else"]
+    [Date "2023.11.11"]
+    [Result "1-0"]
+
+    1. d4 d5 1-0
+""")
+
+# Two different fictional people who both happen to be "Petrov, Sasha" — a
+# common enough name combination that token matching alone conflates them.
+PGN_COMMON_NAME_COLLISION = textwrap.dedent("""\
+    [Event "Club Open"]
+    [White "Petrov, Sasha"]
+    [Black "Opponent A"]
+    [Date "2023.01.01"]
+    [Result "1-0"]
+    [WhiteElo "1950"]
+
+    1. e4 e5 1-0
+
+    [Event "World Junior"]
+    [White "Petrov, Sasha"]
+    [Black "Opponent B"]
+    [Date "1998.01.01"]
+    [Result "1-0"]
+    [WhiteElo "2450"]
+
+    1. d4 d5 1-0
+
+    [Event "No Rating Recorded"]
+    [White "Petrov, Sasha"]
+    [Black "Opponent C"]
+    [Date "2010.01.01"]
+    [Result "0-1"]
+
+    1. c4 c5 0-1
+""")
+
 
 # --- Helpers --------------------------------------------------------------
 
@@ -147,6 +213,49 @@ class TestQuery:
         assert len(games) == 1
         assert games[0]["white"] == "Smith, John"
 
+    def test_does_not_match_substring_within_a_word(self, tmp_path):
+        # "amara" is a substring of "Yamaraj" and "ivan" is a substring of
+        # "Ivanova" — a plain '%token%' LIKE would wrongly match both.
+        pgn = tmp_path / "games.pgn"
+        pgn.write_text(PGN_SUBSTRING_FALSE_POSITIVE)
+        db = str(tmp_path / "test.db")
+        build_index(str(pgn), db_path=db)
+
+        games = get_player_games("Amara, Ivan", db_path=db)
+        assert len(games) == 1
+        assert games[0]["white"] == "Amara, Ivan"
+
+    def test_rating_filters_out_common_name_collision(self, tmp_path):
+        pgn = tmp_path / "games.pgn"
+        pgn.write_text(PGN_COMMON_NAME_COLLISION)
+        db = str(tmp_path / "test.db")
+        build_index(str(pgn), db_path=db)
+
+        # Our "Petrov, Sasha" is rated ~1900 — should get the 1950-rated
+        # game and the unrated one (can't verify, kept), but not the 2450 one.
+        games = get_player_games("Petrov, Sasha", db_path=db, rating=1900)
+        assert len(games) == 2
+        assert not any('"2450"' in g["pgn"] for g in games)
+        assert any('"1950"' in g["pgn"] for g in games)
+
+    def test_no_rating_returns_all_matches(self, tmp_path):
+        pgn = tmp_path / "games.pgn"
+        pgn.write_text(PGN_COMMON_NAME_COLLISION)
+        db = str(tmp_path / "test.db")
+        build_index(str(pgn), db_path=db)
+
+        games = get_player_games("Petrov, Sasha", db_path=db)
+        assert len(games) == 3
+
+    def test_rating_and_limit_combine(self, tmp_path):
+        pgn = tmp_path / "games.pgn"
+        pgn.write_text(PGN_COMMON_NAME_COLLISION)
+        db = str(tmp_path / "test.db")
+        build_index(str(pgn), db_path=db)
+
+        games = get_player_games("Petrov, Sasha", db_path=db, rating=1900, limit=1)
+        assert len(games) == 1
+
     def test_case_insensitive(self, tmp_path):
         pgn = tmp_path / "games.pgn"
         pgn.write_text(PGN_PARTIAL_NAME)
@@ -155,6 +264,19 @@ class TestQuery:
 
         assert get_player_games("smith", db_path=db)
         assert get_player_games("SMITH", db_path=db)
+
+    def test_compound_surname_truncated_in_query(self, tmp_path):
+        pgn = tmp_path / "games.pgn"
+        pgn.write_text(PGN_COMPOUND_SURNAME)
+        db = str(tmp_path / "test.db")
+        build_index(str(pgn), db_path=db)
+
+        # Entry list truncates "Delacroix Beaumont" to "Delacroix" and the
+        # comma lands in a different place — must still find the game,
+        # but must NOT pull in the unrelated "Delacroix, Marc".
+        games = get_player_games("Delacroix, Pierre", db_path=db)
+        assert len(games) == 1
+        assert games[0]["black"] == "Delacroix Beaumont, Pierre"
 
     def test_no_match_returns_empty(self, tmp_path):
         pgn = tmp_path / "games.pgn"

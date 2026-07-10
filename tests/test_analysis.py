@@ -6,7 +6,7 @@ import textwrap
 import pytest
 
 from analysis.openings import (
-    analyse_openings, _opening_line, _result_for_player, _parse_game,
+    analyse_openings, _opening_line, _result_for_player, _parse_game, _game_url,
 )
 from analysis.stats import analyse_stats, _first_white_move
 
@@ -89,6 +89,17 @@ class TestOpeningLine:
 # ---------------------------------------------------------------------------
 
 class TestResultForPlayer:
+    def test_compound_surname_matches(self):
+        # Entry list says "Delacroix, Pierre"; PGN header has the fuller
+        # "Delacroix Beaumont, Pierre" — must still match.
+        game = _parse_game(_pgn("Opponent, Someone", "Delacroix Beaumont, Pierre", "0-1"))
+        assert _result_for_player(game, "Delacroix, Pierre") == "win"
+
+    def test_compound_surname_does_not_match_different_person(self):
+        # Same surname prefix, different first name — must NOT match.
+        game = _parse_game(_pgn("Opponent, Someone", "Delacroix, Marc", "0-1"))
+        assert _result_for_player(game, "Delacroix, Pierre") == "unknown"
+
     def test_white_wins(self):
         assert _result_for_player(_parse_game(W_WIN1), "Smith") == "win"
 
@@ -103,6 +114,35 @@ class TestResultForPlayer:
 
     def test_black_loses(self):
         assert _result_for_player(_parse_game(B_SIC_L), "Smith") == "loss"
+
+
+# ---------------------------------------------------------------------------
+# _game_url
+# ---------------------------------------------------------------------------
+
+class TestGameUrl:
+    def test_prefers_game_url_header(self):
+        game = _parse_game(_pgn("A", "B", "1-0")
+                           .replace('[Result "1-0"]',
+                                    '[Result "1-0"]\n[GameURL "games/a/1.html"]\n'
+                                    '[Site "https://lichess.org/xyz"]'))
+        assert _game_url(game.headers) == "games/a/1.html"
+
+    def test_falls_back_to_site_header(self):
+        game = _parse_game(_pgn("A", "B", "1-0")
+                           .replace('[Result "1-0"]',
+                                    '[Result "1-0"]\n[Site "https://lichess.org/xyz"]'))
+        assert _game_url(game.headers) == "https://lichess.org/xyz"
+
+    def test_falls_back_to_link_header(self):
+        game = _parse_game(_pgn("A", "B", "1-0")
+                           .replace('[Result "1-0"]',
+                                    '[Result "1-0"]\n[Link "https://www.chess.com/game/live/1"]'))
+        assert _game_url(game.headers) == "https://www.chess.com/game/live/1"
+
+    def test_no_url_when_site_is_not_a_url(self):
+        game = _parse_game(_pgn("A", "B", "1-0"))
+        assert _game_url(game.headers) is None
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +181,26 @@ class TestAnalyseOpenings:
         result = analyse_openings(ALL_GAMES, "Nobody, N", depth=6)
         assert result["as_white"] == []
         assert result["as_black"] == []
+
+    def test_games_list_attached_per_line(self):
+        pgn = _pgn("Smith, John", "Opponent A", "1-0")
+        result = analyse_openings([pgn], "Smith, John", depth=6)
+        row = result["as_white"][0]
+        assert len(row["games"]) == 1
+        assert row["games"][0]["opponent"] == "Opponent A"
+        assert row["games"][0]["result"] == "win"
+
+    def test_game_url_from_lichess_site_header(self):
+        pgn = textwrap.dedent("""\
+            [White "Smith, John"]
+            [Black "Opponent A"]
+            [Site "https://lichess.org/abcd1234"]
+            [Result "1-0"]
+
+            1. e4 e5 1-0
+        """)
+        result = analyse_openings([pgn], "Smith, John", depth=2)
+        assert result["as_white"][0]["games"][0]["url"] == "https://lichess.org/abcd1234"
 
     def test_case_insensitive_player_match(self):
         result = analyse_openings(ALL_GAMES, "smith", depth=2)
