@@ -4,7 +4,7 @@ general web search — Lichess has no API to search broadcasts by player
 name, only by broadcast/tournament title (see lookup.websearch for why).
 
 Usage:
-  python -m lookup.broadcasts "Nakamura, Hikaru" --api-key BSA...
+  python -m lookup.broadcasts "Nakamura, Hikaru" --searxng-url http://localhost:8080
 
 API used (no auth required, once a round is found):
   https://lichess.org/api/broadcast/round/{roundId}.pgn
@@ -35,9 +35,9 @@ def _extract_round_id(url: str) -> str | None:
     return m.group(1) if m else None
 
 
-def find_broadcast_round_ids(player_name: str, api_key: str, max_results: int = 5) -> list[str]:
+def find_broadcast_round_ids(player_name: str, searxng_url: str, max_results: int = 5) -> list[str]:
     """Web-search for the player's name alongside Lichess broadcasts, return round IDs found."""
-    results = web_search(f'"{player_name}" lichess.org/broadcast', api_key, count=max_results)
+    results = web_search(f'"{player_name}" lichess.org/broadcast', searxng_url, count=max_results)
     round_ids: list[str] = []
     for r in results:
         rid = _extract_round_id(r.get("url", ""))
@@ -53,7 +53,7 @@ def get_round_pgn(round_id: str) -> str:
     return resp.text
 
 
-def find_games(player_name: str, api_key: str, max_results: int = 5) -> list[str]:
+def find_games(player_name: str, searxng_url: str, max_results: int = 5) -> list[str]:
     """
     Search for broadcasts mentioning `player_name`, fetch matching rounds,
     and return every game in them as a PGN string. Games not actually
@@ -62,7 +62,7 @@ def find_games(player_name: str, api_key: str, max_results: int = 5) -> list[str
     found" source rather than duplicating that filtering logic.
     """
     pgns: list[str] = []
-    for round_id in find_broadcast_round_ids(player_name, api_key, max_results=max_results):
+    for round_id in find_broadcast_round_ids(player_name, searxng_url, max_results=max_results):
         try:
             text = get_round_pgn(round_id)
         except requests.HTTPError:
@@ -76,12 +76,13 @@ def main() -> None:
         description="Find Lichess broadcast games for a player via web search."
     )
     parser.add_argument("player", help="Player name, e.g. 'Carlsen, Magnus'")
-    parser.add_argument("--api-key", required=True, help="Brave Search API key")
+    parser.add_argument("--searxng-url", required=True,
+                        help="Base URL of your SearXNG instance, e.g. http://localhost:8080")
     parser.add_argument("--max-results", type=int, default=5)
     parser.add_argument("--output", choices=["pgn", "json"], default="pgn")
     args = parser.parse_args()
 
-    games = find_games(args.player, args.api_key, max_results=args.max_results)
+    games = find_games(args.player, args.searxng_url, max_results=args.max_results)
     print(f"Found {len(games)} game(s).", file=sys.stderr)
 
     if args.output == "json":
