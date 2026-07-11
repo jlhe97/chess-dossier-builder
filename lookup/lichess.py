@@ -163,7 +163,13 @@ def _slim_profile(data: dict) -> dict:
     profile = data.get("profile") or {}
     return {
         "username": data.get("id") or data.get("username", ""),
-        "display_name": data.get("username", ""),
+        # Autocomplete's raw JSON only has "id" (lowercase-normalized), not
+        # "username" — falling back the same way "username" above does
+        # keeps display_name non-empty for autocomplete-only results
+        # instead of "", which made _name_score(name, "") score every
+        # candidate identically (effectively random ranking) in the
+        # resolver's cheap name-only first pass.
+        "display_name": data.get("username") or data.get("id", ""),
         "title": data.get("title"),
         "ratings": {
             k: perfs[k]["rating"]

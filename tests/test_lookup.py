@@ -103,6 +103,14 @@ class TestLichessSlimProfile:
         assert p["username"] == "gmkasparov"
         assert p["display_name"] == "GMKasparov"
 
+    def test_display_name_falls_back_to_id_for_autocomplete_only_data(self):
+        # /api/player/autocomplete's raw entries only ever have "id", never
+        # "username" — display_name must not go empty here, or every
+        # autocomplete candidate scores identically (effectively unranked)
+        # in the resolver's cheap name-only first pass.
+        p = _slim_profile({"id": "kasparov1", "title": None, "perfs": {}})
+        assert p["display_name"] == "kasparov1"
+
     def test_extracts_title(self):
         assert _slim_profile(LICHESS_USER)["title"] == "GM"
 
