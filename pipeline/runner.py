@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import json
+import hashlib
 import argparse
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -122,6 +123,32 @@ def _fetch_broadcast_games(name: str, searxng_url: str, max_results: int = 10) -
     except Exception as exc:
         print(f"  Broadcast search failed ({name}): {exc}", file=sys.stderr)
         return []
+
+
+def _resolve_with_cache(cache_db: str, no_cache: bool, cache_ttl_days: float,
+                        name: str, platform: str, resolve_fn) -> tuple[str | None, str | None, float, list[str], bool]:
+    """
+    Wrap a resolve_lichess/resolve_chesscom call with pipeline.cache's
+    resolution cache — the guess/search sweep behind either resolver is
+    the most expensive, most-redone-for-no-reason part of a re-run, since
+    a player's identity rarely changes between scans. `resolve_fn` (called
+    with no arguments; the caller closes over rating/fide_country/etc.) is
+    only invoked on a cache miss or expiry. A cached "no match found"
+    (username None) is a valid, saved result too — re-sweeping every guess
+    for an unresolved player is the *slowest* case to redo, not the cheapest
+    to skip caching.
+
+    Returns (username, confidence, score, reasons, from_cache).
+    """
+    from pipeline.cache import get_resolution, save_resolution
+    if not no_cache:
+        cached = get_resolution(cache_db, name, platform, ttl_days=cache_ttl_days)
+        if cached is not None:
+            return cached["username"], cached["confidence"], cached["score"], cached["reasons"], True
+    username, confidence, score, reasons = resolve_fn()
+    if not no_cache:
+        save_resolution(cache_db, name, platform, username, confidence, score, reasons)
+    return username, confidence, score, reasons, False
 
 
 def _fetch_fide_country(uscf_id: str | None) -> str | None:
@@ -679,11 +706,39 @@ def _esc_title(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _delink_broadcast_games(pgn_strings: list[str]) -> list[str]:
+    """
+    A broadcast game's PGN carries a real Site/GameURL pointing at the
+    live Lichess broadcast page. Strip those headers so _ensure_game_links
+    treats the game the same as a megabase game (no public URL) and folds
+    it into the local games-browser page instead of linking straight out
+    to the broadcast page — analysis (openings/stats) still sees the game
+    either way, only the report's link target changes.
+    """
+    result = []
+    for pgn_text in pgn_strings:
+        try:
+            game = chess.pgn.read_game(io.StringIO(pgn_text))
+        except Exception:
+            game = None
+        if game is None:
+            result.append(pgn_text)
+            continue
+        for k in ("GameURL", "Link", "Site", "BroadcastURL"):
+            if k in game.headers:
+                del game.headers[k]
+        buf = io.StringIO()
+        game.accept(chess.pgn.FileExporter(buf))
+        result.append(buf.getvalue().strip())
+    return result
+
+
 def _ensure_game_links(pgn_strings: list[str], out_dir: Path, slug: str) -> list[str]:
     """
-    Games with no public URL (e.g. from the megabase, unlike Lichess/chess.com/
-    broadcast games whose PGN already carries one in GameURL/Link/Site) are
-    collected into a single interactive game-browser page at
+    Games with no public URL (from the megabase, or a broadcast game that's
+    already been through _delink_broadcast_games — unlike Lichess/chess.com
+    games, whose PGN carries a real public URL in GameURL/Link/Site that's
+    left alone) are collected into a single interactive game-browser page at
     <out_dir>/games/<slug>/index.html — a game list you click through to
     load onto a traversable board — with a GameURL header (pointing at that
     game's anchor within the page) injected so opening tables can link to it.
@@ -746,6 +801,9 @@ def run_pipeline(
     fmt: str = "html",
     exclude: list[str] | None = None,
     dossier_db: str | None = None,
+    cache_db: str | None = None,
+    no_cache: bool = False,
+    cache_ttl_days: float = 7.0,
 ) -> list[Path]:
     """
     Run the full pipeline for a tournament. Returns list of written file paths.
@@ -756,9 +814,20 @@ def run_pipeline(
     tournaments, or the same tournament rescanned later, build up a
     queryable history instead of each run just overwriting the last one's
     report files.
+
+    `cache_db` (see pipeline.cache; default `<output_dir>/pipeline_cache.db`,
+    always on unless `no_cache=True`) is a separate, purely-internal SQLite
+    cache: it remembers each player's Lichess/chess.com resolution
+    (username/confidence/score) for `cache_ttl_days` so a re-run doesn't
+    redo the expensive guess/search sweep for a player whose identity was
+    already established recently, and it accumulates every broadcast game
+    ever found for a player so a later run that misses one (SearXNG's
+    engines aren't 100% reliable call to call) doesn't lose it.
     """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
+    if cache_db is None:
+        cache_db = str(out / "pipeline_cache.db")
 
     print(f"Scraping entry list: {tournament}", file=sys.stderr)
     players = scrape_entry_list(tournament, site=site)
@@ -774,6 +843,7 @@ def run_pipeline(
 
     written: list[Path] = []
     dossiers: list[dict] = []
+    from pipeline.cache import get_broadcast_games, save_broadcast_games
 
     for i, player in enumerate(players, 1):
         name = _strip_title(player.get("name", "").strip())
@@ -797,10 +867,12 @@ def run_pipeline(
             pgn_strings += mb_pgns
 
         # --- Lichess ---
-        lichess_user, lc_conf, lc_score, lc_reasons = resolve_lichess(
-            name, rating=entry_rating, searxng_url=searxng_url, fide_country=fide_country)
+        lichess_user, lc_conf, lc_score, lc_reasons, lc_cached = _resolve_with_cache(
+            cache_db, no_cache, cache_ttl_days, name, "lichess",
+            lambda: resolve_lichess(name, rating=entry_rating, searxng_url=searxng_url, fide_country=fide_country))
+        cache_tag = " [cached]" if lc_cached else ""
         if lichess_user:
-            print(f"  Lichess: {lichess_user} ({lc_conf} confidence, {lc_score:.2f} — {'; '.join(lc_reasons)})",
+            print(f"  Lichess: {lichess_user} ({lc_conf} confidence, {lc_score:.2f}{cache_tag} — {'; '.join(lc_reasons)})",
                  file=sys.stderr)
             pgns, profile = _fetch_lichess_games(lichess_user, max_games)
             print(f"  Lichess games: {len(pgns)}", file=sys.stderr)
@@ -824,13 +896,15 @@ def run_pipeline(
                 print(f"  Lichess study games: {len(study_pgns)}", file=sys.stderr)
                 pgn_strings += study_pgns
         else:
-            print("  Lichess: no match found", file=sys.stderr)
+            print(f"  Lichess: no match found{cache_tag}", file=sys.stderr)
 
         # --- chess.com ---
-        cc_user, cc_conf, cc_score, cc_reasons = resolve_chesscom(
-            name, rating=entry_rating, searxng_url=searxng_url, fide_country=fide_country)
+        cc_user, cc_conf, cc_score, cc_reasons, cc_cached = _resolve_with_cache(
+            cache_db, no_cache, cache_ttl_days, name, "chesscom",
+            lambda: resolve_chesscom(name, rating=entry_rating, searxng_url=searxng_url, fide_country=fide_country))
+        cache_tag = " [cached]" if cc_cached else ""
         if cc_user:
-            print(f"  chess.com: {cc_user} ({cc_conf} confidence, {cc_score:.2f} — {'; '.join(cc_reasons)})",
+            print(f"  chess.com: {cc_user} ({cc_conf} confidence, {cc_score:.2f}{cache_tag} — {'; '.join(cc_reasons)})",
                  file=sys.stderr)
             pgns, profile = _fetch_chesscom_games(cc_user, chesscom_months)
             print(f"  chess.com games: {len(pgns)}", file=sys.stderr)
@@ -851,13 +925,27 @@ def run_pipeline(
                         prof_dict["recent_games_count"] = count
                 profiles.append(prof_dict)
         else:
-            print("  chess.com: no match found", file=sys.stderr)
+            print(f"  chess.com: no match found{cache_tag}", file=sys.stderr)
 
-        # --- Broadcasts (opt-in: needs a SearXNG instance) ---
-        if searxng_url:
-            bc_pgns = _fetch_broadcast_games(name, searxng_url)
-            print(f"  Broadcast games: {len(bc_pgns)}", file=sys.stderr)
-            pgn_strings += bc_pgns
+        # --- Broadcasts (opt-in search: needs a SearXNG instance; but
+        # previously-found games are always resurfaced from the cache even
+        # without one) ---
+        cached_bc_pgns = get_broadcast_games(cache_db, name) if not no_cache else []
+        new_bc_pgns = _fetch_broadcast_games(name, searxng_url) if searxng_url else []
+        if not no_cache:
+            save_broadcast_games(cache_db, name, new_bc_pgns)
+        seen_hashes: set[str] = set()
+        bc_pgns = []
+        for pgn in cached_bc_pgns + new_bc_pgns:
+            h = hashlib.sha256(pgn.encode()).hexdigest()
+            if h not in seen_hashes:
+                seen_hashes.add(h)
+                bc_pgns.append(pgn)
+        new_count = sum(1 for p in new_bc_pgns if p not in cached_bc_pgns)
+        print(f"  Broadcast games: {len(bc_pgns)} ({new_count} new this run)", file=sys.stderr)
+        # Never link straight out to the live broadcast page — fold these
+        # into the same local games-browser megabase games use instead.
+        pgn_strings += _delink_broadcast_games(bc_pgns)
 
         if not pgn_strings:
             print("  No games found — generating skeleton dossier.", file=sys.stderr)
@@ -945,6 +1033,15 @@ def main() -> None:
     parser.add_argument("--dossier-db", metavar="DB",
                         help="SQLite database to also save every dossier into (see dossier.db) — "
                              "builds a queryable history across repeated scans over time")
+    parser.add_argument("--cache-db", metavar="DB",
+                        help="SQLite cache for resolver results and broadcast games (see pipeline.cache) — "
+                             "default: <output-dir>/pipeline_cache.db. Always on unless --no-cache.")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="Disable the resolver/broadcast cache entirely — always re-resolve and "
+                             "re-search from scratch")
+    parser.add_argument("--cache-ttl-days", type=float, default=7.0,
+                        help="How long a cached Lichess/chess.com resolution stays valid before a "
+                             "re-run re-resolves it (default: 7)")
     args = parser.parse_args()
 
     run_pipeline(
@@ -962,6 +1059,9 @@ def main() -> None:
         fmt=args.fmt,
         exclude=args.exclude,
         dossier_db=args.dossier_db,
+        cache_db=args.cache_db,
+        no_cache=args.no_cache,
+        cache_ttl_days=args.cache_ttl_days,
     )
 
 

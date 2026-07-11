@@ -12,7 +12,7 @@ import pytest
 import requests
 
 from pipeline.resolver import resolve_lichess, resolve_chesscom, _similarity, _strip_title
-from pipeline.runner import _slug, run_pipeline, _ensure_game_links
+from pipeline.runner import _slug, run_pipeline, _ensure_game_links, _delink_broadcast_games
 from dossier.report import build_dossier, render_markdown, render_html, render_html_combined
 
 
@@ -781,6 +781,42 @@ class TestEnsureGameLinks:
         assert not (tmp_path / "games").exists()
 
 
+class TestDelinkBroadcastGames:
+    def _broadcast_pgn(self):
+        return textwrap.dedent("""\
+            [Event "Round 4"]
+            [Site "https://lichess.org/broadcast/some-open/round-4/Pw9hFsl7/2PM8saRl"]
+            [White "Smith, John"]
+            [Black "Opp"]
+            [Result "1-0"]
+            [BroadcastURL "https://lichess.org/broadcast/some-open/round-4/Pw9hFsl7"]
+            [GameURL "https://lichess.org/broadcast/some-open/round-4/Pw9hFsl7/2PM8saRl"]
+
+            1. e4 e5 1-0
+        """)
+
+    def test_strips_all_url_headers(self):
+        out = _delink_broadcast_games([self._broadcast_pgn()])
+        assert "lichess.org/broadcast" not in out[0]
+        assert "GameURL" not in out[0]
+        assert "BroadcastURL" not in out[0]
+        assert "Site" not in out[0]
+
+    def test_composes_with_ensure_game_links_to_produce_local_link(self, tmp_path):
+        # The real pipeline flow: delink, then _ensure_game_links routes
+        # the now-URL-less game into the local browser instead of an
+        # external link.
+        delinked = _delink_broadcast_games([self._broadcast_pgn()])
+        out = _ensure_game_links(delinked, tmp_path, "smith_john")
+        assert "lichess.org/broadcast" not in out[0]
+        assert "games/smith_john/index.html#g1" in out[0]
+
+    def test_empty_pgn_passed_through_unchanged(self):
+        # chess.pgn.read_game returns None only on true EOF with no content
+        # at all (garbage text still parses to a synthetic empty Game).
+        assert _delink_broadcast_games([""]) == [""]
+
+
 class TestRunPipeline:
     @patch("pipeline.runner.resolve_chesscom", return_value=(None, None, 0.0, []))
     @patch("pipeline.runner.resolve_lichess",  return_value=(None, None, 0.0, []))
@@ -924,6 +960,100 @@ class TestRunPipeline:
     @patch("pipeline.runner.resolve_lichess",  return_value=(None, None, 0.0, []))
     @patch("pipeline.runner.scrape_entry_list", return_value=MOCK_PLAYERS)
     def test_no_dossier_db_by_default(self, mock_scrape, mock_lich, mock_cc, tmp_path):
+        # The opt-in cross-scan history db must not appear by default — the
+        # always-on pipeline_cache.db (see pipeline.cache) is a separate,
+        # purely internal thing and is expected to exist even here.
         run_pipeline("Challenge34", output_dir=str(tmp_path), fmt="markdown")
         assert not (tmp_path / "history.db").exists()
-        assert not any(tmp_path.glob("*.db"))
+        assert (tmp_path / "pipeline_cache.db").exists()
+
+    @patch("pipeline.runner._fetch_lichess_studies", return_value=[])
+    @patch("pipeline.runner._fetch_lichess_games", return_value=([], None))
+    @patch("pipeline.runner.resolve_chesscom", return_value=(None, None, 0.0, []))
+    @patch("pipeline.runner.resolve_lichess",  return_value=("jsmith", "low", 0.4, ["reason"]))
+    @patch("pipeline.runner.scrape_entry_list",
+           return_value=[{"name": "Smith, John", "rating": "1800"}])
+    def test_second_run_reuses_cached_resolution(self, mock_scrape, mock_lich, mock_cc,
+                                                 mock_fetch_lich, mock_fetch_studies, tmp_path):
+        run_pipeline("Challenge34", output_dir=str(tmp_path), fmt="markdown")
+        assert mock_lich.call_count == 1
+        run_pipeline("Challenge34", output_dir=str(tmp_path), fmt="markdown")
+        # Second run should hit the resolution cache instead of re-resolving.
+        assert mock_lich.call_count == 1
+
+    @patch("pipeline.runner._fetch_lichess_studies", return_value=[])
+    @patch("pipeline.runner._fetch_lichess_games", return_value=([], None))
+    @patch("pipeline.runner.resolve_chesscom", return_value=(None, None, 0.0, []))
+    @patch("pipeline.runner.resolve_lichess",  return_value=("jsmith", "low", 0.4, ["reason"]))
+    @patch("pipeline.runner.scrape_entry_list",
+           return_value=[{"name": "Smith, John", "rating": "1800"}])
+    def test_cached_resolution_shown_in_log(self, mock_scrape, mock_lich, mock_cc,
+                                            mock_fetch_lich, mock_fetch_studies, tmp_path, capsys):
+        run_pipeline("Challenge34", output_dir=str(tmp_path), fmt="markdown")
+        run_pipeline("Challenge34", output_dir=str(tmp_path), fmt="markdown")
+        assert "[cached]" in capsys.readouterr().err
+
+    @patch("pipeline.runner._fetch_lichess_studies", return_value=[])
+    @patch("pipeline.runner._fetch_lichess_games", return_value=([], None))
+    @patch("pipeline.runner.resolve_chesscom", return_value=(None, None, 0.0, []))
+    @patch("pipeline.runner.resolve_lichess",  return_value=("jsmith", "low", 0.4, ["reason"]))
+    @patch("pipeline.runner.scrape_entry_list",
+           return_value=[{"name": "Smith, John", "rating": "1800"}])
+    def test_no_cache_flag_always_reresolves(self, mock_scrape, mock_lich, mock_cc,
+                                             mock_fetch_lich, mock_fetch_studies, tmp_path):
+        run_pipeline("Challenge34", output_dir=str(tmp_path), fmt="markdown", no_cache=True)
+        run_pipeline("Challenge34", output_dir=str(tmp_path), fmt="markdown", no_cache=True)
+        assert mock_lich.call_count == 2
+        assert not (tmp_path / "pipeline_cache.db").exists()
+
+    @patch("pipeline.runner._fetch_broadcast_games")
+    @patch("pipeline.runner.resolve_chesscom", return_value=(None, None, 0.0, []))
+    @patch("pipeline.runner.resolve_lichess",  return_value=(None, None, 0.0, []))
+    @patch("pipeline.runner.scrape_entry_list",
+           return_value=[{"name": "Smith, John", "rating": "1800"}])
+    def test_broadcast_game_never_shows_external_link(self, mock_scrape, mock_lich, mock_cc,
+                                                       mock_fetch_bc, tmp_path):
+        mock_fetch_bc.return_value = [textwrap.dedent("""\
+            [Event "Round 4"]
+            [Site "https://lichess.org/broadcast/some-open/round-4/Pw9hFsl7/2PM8saRl"]
+            [White "Smith, John"]
+            [Black "Opp"]
+            [Result "1-0"]
+            [GameURL "https://lichess.org/broadcast/some-open/round-4/Pw9hFsl7/2PM8saRl"]
+
+            1. e4 e5 1-0
+        """)]
+        run_pipeline("Challenge34", output_dir=str(tmp_path), fmt="html",
+                    searxng_url="http://localhost:8080")
+        html = (tmp_path / "smith_john.html").read_text()
+        assert "lichess.org/broadcast" not in html
+        assert (tmp_path / "games" / "smith_john" / "index.html").exists()
+
+    @patch("pipeline.runner._fetch_broadcast_games")
+    @patch("pipeline.runner.resolve_chesscom", return_value=(None, None, 0.0, []))
+    @patch("pipeline.runner.resolve_lichess",  return_value=(None, None, 0.0, []))
+    @patch("pipeline.runner.scrape_entry_list",
+           return_value=[{"name": "Smith, John", "rating": "1800"}])
+    def test_broadcast_game_persists_across_runs_even_if_search_misses_it(
+            self, mock_scrape, mock_lich, mock_cc, mock_fetch_bc, tmp_path):
+        # Simulates SearXNG's known flakiness: the game is found once, then
+        # a later run's search comes up empty — the game must still show up
+        # in the second run's dossier, from the cache.
+        bc_pgn = textwrap.dedent("""\
+            [Event "Round 4"]
+            [Site "https://lichess.org/broadcast/some-open/round-4/Pw9hFsl7/2PM8saRl"]
+            [White "Smith, John"]
+            [Black "Opp"]
+            [Result "1-0"]
+
+            1. e4 e5 1-0
+        """)
+        mock_fetch_bc.side_effect = [[bc_pgn], []]
+        run_pipeline("Challenge34", output_dir=str(tmp_path), fmt="markdown",
+                    searxng_url="http://localhost:8080")
+        md_first = (tmp_path / "smith_john.md").read_text()
+        run_pipeline("Challenge34", output_dir=str(tmp_path), fmt="markdown",
+                    searxng_url="http://localhost:8080")
+        md_second = (tmp_path / "smith_john.md").read_text()
+        assert "## Overview" in md_first
+        assert "## Overview" in md_second
