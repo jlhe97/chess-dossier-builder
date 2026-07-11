@@ -4,7 +4,7 @@ flag in dossier.report — all network and I/O calls mocked.
 """
 
 import textwrap
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -288,6 +288,61 @@ class TestResolveLichess:
         u, c, score, reasons = resolve_lichess("Smith, John", rating=1800)
         assert c == "high"
 
+    @patch("lookup.lichess.get_profile")
+    @patch("lookup.lichess.search")
+    def test_stale_account_caps_confidence_at_low(self, mock_search, mock_profile):
+        # Name, rating, and country all line up, and there are plenty of
+        # games — but the account hasn't been active in ~6 years, which is
+        # weak evidence it's still *this* player's current account.
+        stale_date = (date.today() - timedelta(days=6 * 365)).isoformat()
+        mock_search.return_value = [
+            {"username": "jsmith", "display_name": "jsmith", "title": None,
+             "ratings": {}, "url": ""},
+        ]
+        mock_profile.return_value = {
+            "username": "jsmith", "display_name": "jsmith",
+            "real_name": "John Smith", "ratings": {"blitz": 1800},
+            "country": "US", "fide_rating": None, "games_count": 500,
+            "last_active": stale_date,
+        }
+        u, c, score, reasons = resolve_lichess("Smith, John", rating=1800)
+        assert score >= 0.55  # would be "high" on score alone
+        assert c == "low"
+        assert any("capped" in r and "activity" in r for r in reasons)
+
+    @patch("lookup.lichess.get_profile")
+    @patch("lookup.lichess.search")
+    def test_recent_activity_does_not_cap(self, mock_search, mock_profile):
+        recent_date = (date.today() - timedelta(days=30)).isoformat()
+        mock_search.return_value = [
+            {"username": "jsmith", "display_name": "jsmith", "title": None,
+             "ratings": {}, "url": ""},
+        ]
+        mock_profile.return_value = {
+            "username": "jsmith", "display_name": "jsmith",
+            "real_name": "John Smith", "ratings": {"blitz": 1800},
+            "country": "US", "fide_rating": None, "games_count": 500,
+            "last_active": recent_date,
+        }
+        u, c, score, reasons = resolve_lichess("Smith, John", rating=1800)
+        assert c == "high"
+        assert any("last active" in r for r in reasons)
+
+    @patch("lookup.lichess.get_profile")
+    @patch("lookup.lichess.search")
+    def test_unknown_last_active_does_not_cap(self, mock_search, mock_profile):
+        mock_search.return_value = [
+            {"username": "jsmith", "display_name": "jsmith", "title": None,
+             "ratings": {}, "url": ""},
+        ]
+        mock_profile.return_value = {
+            "username": "jsmith", "display_name": "jsmith",
+            "real_name": "John Smith", "ratings": {"blitz": 1800},
+            "country": "US", "fide_rating": None, "games_count": 500,
+        }
+        u, c, score, reasons = resolve_lichess("Smith, John", rating=1800)
+        assert c == "high"
+
 
 # ---------------------------------------------------------------------------
 # resolve_chesscom
@@ -391,6 +446,20 @@ class TestResolveChesscom:
         u, c, score, reasons = resolve_chesscom("Smith, John", rating=1800)
         assert score >= 0.55
         assert c == "low"
+
+    @patch("lookup.chesscom.get_profile")
+    def test_stale_account_caps_confidence_at_low(self, mock_get):
+        # Plenty of games, but none in ~6 years — weak evidence this is
+        # still the player's current, active account.
+        stale_date = (date.today() - timedelta(days=6 * 365)).isoformat()
+        mock_get.return_value = {
+            "username": "johnsmith", "ratings": {"rapid": 1800},
+            "country": "US", "games_count": 500, "last_active": stale_date,
+        }
+        u, c, score, reasons = resolve_chesscom("Smith, John", rating=1800)
+        assert score >= 0.55
+        assert c == "low"
+        assert any("capped" in r and "activity" in r for r in reasons)
 
     @patch("lookup.chesscom.get_profile")
     def test_prefers_better_later_guess_over_bad_earlier_hit(self, mock_get):

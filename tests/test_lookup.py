@@ -135,6 +135,14 @@ class TestLichessSlimProfile:
     def test_missing_count_omitted(self):
         assert _slim_profile(LICHESS_USER)["games_count"] is None
 
+    def test_extracts_last_active_as_iso_date(self):
+        # 2026-07-10T00:00:00Z in epoch ms
+        data = {**LICHESS_USER, "seenAt": 1783641600000}
+        assert _slim_profile(data)["last_active"] == "2026-07-10"
+
+    def test_missing_seen_at_omitted(self):
+        assert _slim_profile(LICHESS_USER)["last_active"] is None
+
 
 class TestLichessSearch:
     @patch("lookup.lichess.requests.get")
@@ -347,6 +355,15 @@ class TestChesscomSlimProfile:
     def test_games_count_none_when_no_records(self):
         p = cc_slim_profile("MagnusCarlsen", CHESSCOM_PROFILE, CHESSCOM_STATS)
         assert p["games_count"] is None
+
+    def test_extracts_last_active_as_iso_date(self):
+        profile = {**CHESSCOM_PROFILE, "last_online": 1783641600}  # 2026-07-10T00:00:00Z
+        p = cc_slim_profile("MagnusCarlsen", profile, CHESSCOM_STATS)
+        assert p["last_active"] == "2026-07-10"
+
+    def test_missing_last_online_omitted(self):
+        p = cc_slim_profile("MagnusCarlsen", CHESSCOM_PROFILE, CHESSCOM_STATS)
+        assert p["last_active"] is None
 
 
 class TestChesscomGetProfile:

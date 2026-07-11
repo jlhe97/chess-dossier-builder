@@ -20,6 +20,7 @@ display so a human can sanity-check the match.
 """
 
 import re
+from datetime import date
 from difflib import SequenceMatcher
 
 import requests
@@ -39,6 +40,17 @@ _MIN_GAMES_FOR_HIGH = 5
 # Games above this count no longer add further confidence — an account with
 # hundreds of games isn't meaningfully more "them" than one with 50.
 _GAMES_FOR_FULL_SCORE = 50
+
+# Recency is a separate signal from games_count: an account with hundreds
+# of games but no activity in years is weak evidence of being *this*
+# player's current account, no matter how many games it has on record.
+# Active within this many days scores full marks...
+_RECENCY_FULL_SCORE_DAYS = 90
+# ...tapering to zero by this many days of inactivity...
+_RECENCY_ZERO_SCORE_DAYS = 730
+# ...and beyond this many days inactive (~5 years), it's a hard guardrail
+# like _MIN_GAMES_FOR_HIGH — never "high" confidence regardless of score.
+_STALE_ACCOUNT_DAYS = 5 * 365
 
 # A big online-vs-OTB rating gap is still plausible (different formats,
 # inflation/deflation), so this is a generous tolerance band, not a
@@ -151,34 +163,59 @@ def _game_count_score(games_count: int | None) -> tuple[float | None, str | None
     return score, f"{games_count} game(s) on record"
 
 
+def _recency_score(last_active: str | None) -> tuple[float | None, str | None]:
+    """
+    A separate signal from games_count: an account with hundreds of games
+    but no activity in years is weak evidence of being *this* player's
+    current account, no matter how many games it has on record. Scales
+    down from 1.0 (active within _RECENCY_FULL_SCORE_DAYS) to 0.0 (inactive
+    for _RECENCY_ZERO_SCORE_DAYS or more).
+    """
+    if not last_active:
+        return None, None
+    try:
+        last_date = date.fromisoformat(last_active)
+    except ValueError:
+        return None, None
+    days_ago = (date.today() - last_date).days
+    span = _RECENCY_ZERO_SCORE_DAYS - _RECENCY_FULL_SCORE_DAYS
+    score = max(0.0, min(1.0, 1 - (days_ago - _RECENCY_FULL_SCORE_DAYS) / span))
+    age = f"{days_ago}d ago" if days_ago < 365 else f"{days_ago / 365:.1f}y ago"
+    return score, f"last active {last_active} ({age})"
+
+
 def _composite_score(name_signal: float, name_reason: str, candidate_ratings: dict,
                      candidate_country: str | None, entry_rating: int | None,
                      fide_rating: int | None = None,
                      games_count: int | None = None,
-                     entry_fide_country: str | None = None) -> tuple[float, list[str], bool]:
+                     entry_fide_country: str | None = None,
+                     last_active: str | None = None) -> tuple[float, list[str], bool, bool]:
     """
-    Combine name/handle, rating, country, and game-count signals into one
-    0..1 score. Each signal is weighted, but signals with no data (e.g. no
-    country on file) are simply left out rather than penalising the
-    candidate. `entry_fide_country` is the tournament entrant's own FIDE
-    nationality (looked up separately, e.g. via lookup.uscf) — distinct
-    from `fide_rating`, which is a *candidate* profile's linked FIDE
-    rating — and sharpens the country signal from a blanket US-preference
-    guess into an actual identity cross-check; see _country_score.
+    Combine name/handle, rating, country, game-count, and recency signals
+    into one 0..1 score. Each signal is weighted, but signals with no data
+    (e.g. no country on file) are simply left out rather than penalising
+    the candidate. `entry_fide_country` is the tournament entrant's own
+    FIDE nationality (looked up separately, e.g. via lookup.uscf) —
+    distinct from `fide_rating`, which is a *candidate* profile's linked
+    FIDE rating — and sharpens the country signal from a blanket
+    US-preference guess into an actual identity cross-check; see
+    _country_score.
 
-    Returns (score, reasons, rating_ok). rating_ok is False only when a
-    rating comparison was actually possible *and* it came back
+    Returns (score, reasons, rating_ok, recency_ok). rating_ok is False
+    only when a rating comparison was actually possible *and* it came back
     catastrophically bad (clamped to the 0.0 floor, i.e. the gap is at or
     beyond _RATING_TOLERANCE) — a strong sign this is a different person
-    wearing a similar name, which _confidence_for uses as a hard cap so a
-    high name/country/games score can't paper over it. No rating data at
-    all leaves rating_ok True: absence of evidence isn't evidence of a
-    mismatch.
+    wearing a similar name. recency_ok is False only when the account's
+    last activity is known *and* older than _STALE_ACCOUNT_DAYS. Both are
+    hard caps _confidence_for uses so a high name/country/games score
+    can't paper over them; missing data leaves both True — absence of
+    evidence isn't evidence of a mismatch.
     """
     reasons = [name_reason]
     weighted = name_signal * 0.5
     weight = 0.5
     rating_ok = True
+    recency_ok = True
 
     rating_s, rating_reason = _rating_score(entry_rating, candidate_ratings, fide_rating)
     if rating_s is not None:
@@ -199,11 +236,19 @@ def _composite_score(name_signal: float, name_reason: str, candidate_ratings: di
         weight += 0.2
         reasons.append(games_reason)
 
-    return round(weighted / weight, 2), reasons, rating_ok
+    recency_s, recency_reason = _recency_score(last_active)
+    if recency_s is not None:
+        weighted += recency_s * 0.15
+        weight += 0.15
+        reasons.append(recency_reason)
+        if last_active:
+            recency_ok = (date.today() - date.fromisoformat(last_active)).days <= _STALE_ACCOUNT_DAYS
+
+    return round(weighted / weight, 2), reasons, rating_ok, recency_ok
 
 
 def _score_lichess_profile(name: str, profile: dict, rating: int | None,
-                           fide_country: str | None = None) -> tuple[float, list[str], bool]:
+                           fide_country: str | None = None) -> tuple[float, list[str], bool, bool]:
     name_s = max(
         _name_score(name, profile.get("real_name") or ""),
         _name_score(name, profile.get("display_name", "")),
@@ -214,12 +259,13 @@ def _score_lichess_profile(name: str, profile: dict, rating: int | None,
         fide_rating=profile.get("fide_rating"),
         games_count=profile.get("games_count"),
         entry_fide_country=fide_country,
+        last_active=profile.get("last_active"),
     )
 
 
 def _resolve_lichess_by_autocomplete(
     name: str, rating: int | None, fide_country: str | None = None
-) -> tuple[str | None, float, list[str], int | None, bool]:
+) -> tuple[str | None, float, list[str], int | None, bool, bool]:
     """
     Score every candidate the autocomplete endpoint returns (a username-only
     search — see module docstring) and pick the best. A cheap name-only
@@ -233,34 +279,35 @@ def _resolve_lichess_by_autocomplete(
         from lookup.lichess import search, get_profile
         candidates = search(name, max_results=5)
     except Exception:
-        return None, -1.0, [], None, True
+        return None, -1.0, [], None, True, True
 
     if not candidates:
-        return None, -1.0, [], None, True
+        return None, -1.0, [], None, True, True
 
     ranked = sorted(candidates,
                     key=lambda c: _name_score(name, c.get("display_name", "")),
                     reverse=True)
 
-    best_username, best_score, best_reasons, best_games, best_rating_ok = None, -1.0, [], None, True
+    best_username, best_score, best_reasons = None, -1.0, []
+    best_games, best_rating_ok, best_recency_ok = None, True, True
     for c in ranked[:2]:
         profile = c
         try:
             profile = get_profile(c["username"])
         except Exception:
             pass
-        score, reasons, rating_ok = _score_lichess_profile(name, profile, rating, fide_country)
+        score, reasons, rating_ok, recency_ok = _score_lichess_profile(name, profile, rating, fide_country)
         if score > best_score:
             best_username = profile.get("username") or c["username"]
             best_score, best_reasons = score, reasons
-            best_games, best_rating_ok = profile.get("games_count"), rating_ok
+            best_games, best_rating_ok, best_recency_ok = profile.get("games_count"), rating_ok, recency_ok
 
-    return best_username, best_score, best_reasons, best_games, best_rating_ok
+    return best_username, best_score, best_reasons, best_games, best_rating_ok, best_recency_ok
 
 
 def _resolve_lichess_by_search(
     name: str, rating: int | None, searxng_url: str, fide_country: str | None = None
-) -> tuple[str | None, float, list[str], int | None, bool]:
+) -> tuple[str | None, float, list[str], int | None, bool, bool]:
     """
     Web-search for the player's Lichess profile — catches an account whose
     username has nothing to do with `name`, findable only via its
@@ -270,30 +317,34 @@ def _resolve_lichess_by_search(
     try:
         from lookup.lichess import find_usernames_via_search, get_profile
     except Exception:
-        return None, -1.0, [], None, True
+        return None, -1.0, [], None, True, True
 
-    best_username, best_score, best_reasons, best_games, best_rating_ok = None, -1.0, [], None, True
+    best_username, best_score, best_reasons = None, -1.0, []
+    best_games, best_rating_ok, best_recency_ok = None, True, True
     for username in find_usernames_via_search(name, searxng_url):
         try:
             profile = get_profile(username)
         except Exception:
             continue
-        score, reasons, rating_ok = _score_lichess_profile(name, profile, rating, fide_country)
+        score, reasons, rating_ok, recency_ok = _score_lichess_profile(name, profile, rating, fide_country)
         if score > best_score:
             best_username, best_score, best_reasons = username, score, reasons
-            best_games, best_rating_ok = profile.get("games_count"), rating_ok
+            best_games, best_rating_ok, best_recency_ok = profile.get("games_count"), rating_ok, recency_ok
 
-    return best_username, best_score, best_reasons, best_games, best_rating_ok
+    return best_username, best_score, best_reasons, best_games, best_rating_ok, best_recency_ok
 
 
-def _confidence_for(score: float, games_count: int | None, rating_ok: bool = True) -> str | None:
+def _confidence_for(score: float, games_count: int | None, rating_ok: bool = True,
+                    recency_ok: bool = True) -> str | None:
     """
-    Map a composite score to a confidence label, with two hard overrides
+    Map a composite score to a confidence label, with three hard overrides
     that can only ever pull "high" down to "low", never the reverse:
       - a match backed by very few games (see _MIN_GAMES_FOR_HIGH)
       - a match whose rating comparison was catastrophically bad (see
         _composite_score's rating_ok)
-    Either one alone means "score says high, but the strongest piece of
+      - a match whose account has had no activity in ~5 years (see
+        _composite_score's recency_ok)
+    Any one alone means "score says high, but the strongest piece of
     corroborating evidence actively argues against it" — not a case to
     present as a confident identity match.
     """
@@ -301,6 +352,8 @@ def _confidence_for(score: float, games_count: int | None, rating_ok: bool = Tru
         if games_count is not None and games_count < _MIN_GAMES_FOR_HIGH:
             return "low"
         if not rating_ok:
+            return "low"
+        if not recency_ok:
             return "low"
         return "high"
     if score >= _LOW_THRESHOLD:
@@ -327,25 +380,27 @@ def resolve_lichess(name: str, rating: int | None = None,
     """
     name = _strip_title(name)
 
-    best_username, best_score, best_reasons, best_games, best_rating_ok = _resolve_lichess_by_autocomplete(
-        name, rating, fide_country)
+    best_username, best_score, best_reasons, best_games, best_rating_ok, best_recency_ok = (
+        _resolve_lichess_by_autocomplete(name, rating, fide_country))
 
     if searxng_url and best_score < _HIGH_THRESHOLD:
-        s_username, s_score, s_reasons, s_games, s_rating_ok = _resolve_lichess_by_search(
+        s_username, s_score, s_reasons, s_games, s_rating_ok, s_recency_ok = _resolve_lichess_by_search(
             name, rating, searxng_url, fide_country)
         if s_score > best_score:
             best_username, best_score, best_reasons = s_username, s_score, s_reasons
-            best_games, best_rating_ok = s_games, s_rating_ok
+            best_games, best_rating_ok, best_recency_ok = s_games, s_rating_ok, s_recency_ok
 
     if best_username is None:
         return None, None, 0.0, []
 
-    confidence = _confidence_for(best_score, best_games, best_rating_ok)
+    confidence = _confidence_for(best_score, best_games, best_rating_ok, best_recency_ok)
     if confidence == "low" and best_score >= _HIGH_THRESHOLD:
         if best_games is not None and best_games < _MIN_GAMES_FOR_HIGH:
             best_reasons = best_reasons + [f"capped from high: only {best_games} games on record"]
         elif not best_rating_ok:
             best_reasons = best_reasons + ["capped from high: rating far outside tolerance"]
+        elif not best_recency_ok:
+            best_reasons = best_reasons + ["capped from high: no recent activity"]
     if confidence is None:
         return None, None, best_score, best_reasons
     return best_username, confidence, best_score, best_reasons
@@ -353,7 +408,7 @@ def resolve_lichess(name: str, rating: int | None = None,
 
 def _resolve_chesscom_by_guessing(
     name: str, rating: int | None, fide_country: str | None = None
-) -> tuple[str | None, float, list[str], int | None, bool]:
+) -> tuple[str | None, float, list[str], int | None, bool, bool]:
     """
     Try every guessed chess.com username, scoring each one that resolves
     to a real profile and keeping the best-scoring candidate — rather than
@@ -373,10 +428,11 @@ def _resolve_chesscom_by_guessing(
     try:
         from lookup.chesscom import guess_usernames, get_profile
     except Exception:
-        return None, -1.0, [], None, True
+        return None, -1.0, [], None, True, True
 
     guesses = guess_usernames(name)
-    best_username, best_score, best_reasons, best_games, best_rating_ok = None, -1.0, [], None, True
+    best_username, best_score, best_reasons = None, -1.0, []
+    best_games, best_rating_ok, best_recency_ok = None, True, True
     for i, username in enumerate(guesses):
         try:
             profile = get_profile(username)
@@ -399,22 +455,23 @@ def _resolve_chesscom_by_guessing(
             if real_s > name_s:
                 name_s, name_reason = real_s, f"real name match {real_s:.2f} ({real_name})"
 
-        score, reasons, rating_ok = _composite_score(
+        score, reasons, rating_ok, recency_ok = _composite_score(
             name_s, name_reason,
             profile.get("ratings", {}), profile.get("country"), rating,
             games_count=profile.get("games_count"),
             entry_fide_country=fide_country,
+            last_active=profile.get("last_active"),
         )
         if score > best_score:
             best_username, best_score, best_reasons = username, score, reasons
-            best_games, best_rating_ok = profile.get("games_count"), rating_ok
+            best_games, best_rating_ok, best_recency_ok = profile.get("games_count"), rating_ok, recency_ok
 
-    return best_username, best_score, best_reasons, best_games, best_rating_ok
+    return best_username, best_score, best_reasons, best_games, best_rating_ok, best_recency_ok
 
 
 def _resolve_chesscom_by_search(
     name: str, rating: int | None, searxng_url: str, fide_country: str | None = None
-) -> tuple[str | None, float, list[str], int | None, bool]:
+) -> tuple[str | None, float, list[str], int | None, bool, bool]:
     """
     Web-search for the player's chess.com profile and score every
     candidate found on real name/rating/country — catches personalized
@@ -424,9 +481,10 @@ def _resolve_chesscom_by_search(
     try:
         from lookup.chesscom import find_usernames_via_search, get_profile
     except Exception:
-        return None, -1.0, [], None, True
+        return None, -1.0, [], None, True, True
 
-    best_username, best_score, best_reasons, best_games, best_rating_ok = None, -1.0, [], None, True
+    best_username, best_score, best_reasons = None, -1.0, []
+    best_games, best_rating_ok, best_recency_ok = None, True, True
     for username in find_usernames_via_search(name, searxng_url):
         try:
             profile = get_profile(username)
@@ -437,17 +495,18 @@ def _resolve_chesscom_by_search(
             _name_score(name, profile.get("real_name") or ""),
             _name_score(name, profile.get("display_name", username)),
         )
-        score, reasons, rating_ok = _composite_score(
+        score, reasons, rating_ok, recency_ok = _composite_score(
             name_s, f"web search match: name {name_s:.2f}",
             profile.get("ratings", {}), profile.get("country"), rating,
             games_count=profile.get("games_count"),
             entry_fide_country=fide_country,
+            last_active=profile.get("last_active"),
         )
         if score > best_score:
             best_username, best_score, best_reasons = username, score, reasons
-            best_games, best_rating_ok = profile.get("games_count"), rating_ok
+            best_games, best_rating_ok, best_recency_ok = profile.get("games_count"), rating_ok, recency_ok
 
-    return best_username, best_score, best_reasons, best_games, best_rating_ok
+    return best_username, best_score, best_reasons, best_games, best_rating_ok, best_recency_ok
 
 
 def resolve_chesscom(name: str, rating: int | None = None,
@@ -468,25 +527,27 @@ def resolve_chesscom(name: str, rating: int | None = None,
     """
     name = _strip_title(name)
 
-    best_username, best_score, best_reasons, best_games, best_rating_ok = _resolve_chesscom_by_guessing(
-        name, rating, fide_country)
+    best_username, best_score, best_reasons, best_games, best_rating_ok, best_recency_ok = (
+        _resolve_chesscom_by_guessing(name, rating, fide_country))
 
     if searxng_url and best_score < _HIGH_THRESHOLD:
-        s_username, s_score, s_reasons, s_games, s_rating_ok = _resolve_chesscom_by_search(
+        s_username, s_score, s_reasons, s_games, s_rating_ok, s_recency_ok = _resolve_chesscom_by_search(
             name, rating, searxng_url, fide_country)
         if s_score > best_score:
             best_username, best_score, best_reasons = s_username, s_score, s_reasons
-            best_games, best_rating_ok = s_games, s_rating_ok
+            best_games, best_rating_ok, best_recency_ok = s_games, s_rating_ok, s_recency_ok
 
     if best_username is None:
         return None, None, 0.0, []
 
-    confidence = _confidence_for(best_score, best_games, best_rating_ok)
+    confidence = _confidence_for(best_score, best_games, best_rating_ok, best_recency_ok)
     if confidence == "low" and best_score >= _HIGH_THRESHOLD:
         if best_games is not None and best_games < _MIN_GAMES_FOR_HIGH:
             best_reasons = best_reasons + [f"capped from high: only {best_games} games on record"]
         elif not best_rating_ok:
             best_reasons = best_reasons + ["capped from high: rating far outside tolerance"]
+        elif not best_recency_ok:
+            best_reasons = best_reasons + ["capped from high: no recent activity"]
     if confidence is None:
         return None, None, best_score, best_reasons
     return best_username, confidence, best_score, best_reasons

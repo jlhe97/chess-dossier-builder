@@ -18,6 +18,7 @@ import sys
 import json
 import argparse
 import time
+from datetime import datetime, timezone
 
 import requests
 
@@ -181,6 +182,15 @@ def _slim_profile(data: dict) -> dict:
         # account with almost no games is weak evidence either way, no
         # matter how well the name matches.
         "games_count": data.get("count", {}).get("all"),
+        # Also full-profile-only — when this account was last seen online,
+        # used as a confidence signal distinct from games_count: an account
+        # with hundreds of games but no activity in years is weak evidence
+        # of being *this* player's current account, regardless of how many
+        # games it has on record.
+        "last_active": (
+            datetime.fromtimestamp(data["seenAt"] / 1000, tz=timezone.utc).date().isoformat()
+            if data.get("seenAt") else None
+        ),
     }
 
 

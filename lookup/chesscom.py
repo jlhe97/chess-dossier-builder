@@ -20,7 +20,7 @@ import sys
 import json
 import argparse
 import calendar
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import requests
 
@@ -198,6 +198,14 @@ def _slim_profile(username: str, profile: dict, stats: dict) -> dict:
         "url": profile.get("url", f"https://www.chess.com/member/{username}"),
         "country": profile.get("country", "").split("/")[-1],
         "games_count": games_count,
+        # When this account was last online, used as a confidence signal
+        # distinct from games_count: an account with hundreds of games but
+        # no activity in years is weak evidence of being *this* player's
+        # current account, regardless of how many games it has on record.
+        "last_active": (
+            datetime.fromtimestamp(profile["last_online"], tz=timezone.utc).date().isoformat()
+            if profile.get("last_online") else None
+        ),
     }
 
 
