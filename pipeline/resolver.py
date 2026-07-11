@@ -57,6 +57,21 @@ _STALE_ACCOUNT_DAYS = 5 * 365
 # strict cutoff — it only nudges the score, never hard-rejects.
 _RATING_TOLERANCE = 800
 
+# A real production case exposed this: chess.com's bare single-word guesses
+# ("john") get a low placeholder name score (0.4, see
+# _resolve_chesscom_by_guessing) precisely because they're generic enough to
+# collide with an unrelated stranger — but when that stranger's account also
+# happens to have a "preferred" country, plenty of games, and recent
+# activity, those three signals alone (none of which is actually
+# person-specific — country is broad, games/recency just prove "a real
+# active account", not "the right one") can still drag the composite score
+# past _HIGH_THRESHOLD, with no rating comparison available at all to catch
+# the mismatch the way _RATING_TOLERANCE normally would. 0.65 mirrors
+# _name_score's own surname-substring floor, so any guess/search hit that's
+# genuinely tied to the name (compound guess, real-name match, or a search
+# result whose surname actually appears) already clears it.
+_MIN_NAME_SCORE_FOR_HIGH = 0.65
+
 # Tournaments on the two supported sites (kingregistration.com,
 # chessaction.com) are US-based, so a US-located profile is weak
 # positive evidence and a clearly non-US one is weak negative evidence.
@@ -335,15 +350,17 @@ def _resolve_lichess_by_search(
 
 
 def _confidence_for(score: float, games_count: int | None, rating_ok: bool = True,
-                    recency_ok: bool = True) -> str | None:
+                    recency_ok: bool = True, name_ok: bool = True) -> str | None:
     """
-    Map a composite score to a confidence label, with three hard overrides
+    Map a composite score to a confidence label, with four hard overrides
     that can only ever pull "high" down to "low", never the reverse:
       - a match backed by very few games (see _MIN_GAMES_FOR_HIGH)
       - a match whose rating comparison was catastrophically bad (see
         _composite_score's rating_ok)
       - a match whose account has had no activity in ~5 years (see
         _composite_score's recency_ok)
+      - a match whose name evidence is a generic, uncorroborated guess
+        (see _MIN_NAME_SCORE_FOR_HIGH)
     Any one alone means "score says high, but the strongest piece of
     corroborating evidence actively argues against it" — not a case to
     present as a confident identity match.
@@ -354,6 +371,8 @@ def _confidence_for(score: float, games_count: int | None, rating_ok: bool = Tru
         if not rating_ok:
             return "low"
         if not recency_ok:
+            return "low"
+        if not name_ok:
             return "low"
         return "high"
     if score >= _LOW_THRESHOLD:
@@ -408,7 +427,7 @@ def resolve_lichess(name: str, rating: int | None = None,
 
 def _resolve_chesscom_by_guessing(
     name: str, rating: int | None, fide_country: str | None = None
-) -> tuple[str | None, float, list[str], int | None, bool, bool]:
+) -> tuple[str | None, float, list[str], int | None, bool, bool, bool]:
     """
     Try every guessed chess.com username, scoring each one that resolves
     to a real profile and keeping the best-scoring candidate — rather than
@@ -428,11 +447,11 @@ def _resolve_chesscom_by_guessing(
     try:
         from lookup.chesscom import guess_usernames, get_profile
     except Exception:
-        return None, -1.0, [], None, True, True
+        return None, -1.0, [], None, True, True, True
 
     guesses = guess_usernames(name)
     best_username, best_score, best_reasons = None, -1.0, []
-    best_games, best_rating_ok, best_recency_ok = None, True, True
+    best_games, best_rating_ok, best_recency_ok, best_name_ok = None, True, True, True
     for i, username in enumerate(guesses):
         try:
             profile = get_profile(username)
@@ -455,6 +474,13 @@ def _resolve_chesscom_by_guessing(
             if real_s > name_s:
                 name_s, name_reason = real_s, f"real name match {real_s:.2f} ({real_name})"
 
+        # A weak, generic guess (bare "john") is only trustworthy if
+        # something else actually ties it to *this* person — a rating
+        # comparison genuinely happened (entry rating known and the
+        # account has one on file), not just "no data to contradict it".
+        # See _MIN_NAME_SCORE_FOR_HIGH.
+        rating_corroborated = bool(rating) and bool(profile.get("ratings"))
+
         score, reasons, rating_ok, recency_ok = _composite_score(
             name_s, name_reason,
             profile.get("ratings", {}), profile.get("country"), rating,
@@ -465,13 +491,14 @@ def _resolve_chesscom_by_guessing(
         if score > best_score:
             best_username, best_score, best_reasons = username, score, reasons
             best_games, best_rating_ok, best_recency_ok = profile.get("games_count"), rating_ok, recency_ok
+            best_name_ok = name_s >= _MIN_NAME_SCORE_FOR_HIGH or rating_corroborated
 
-    return best_username, best_score, best_reasons, best_games, best_rating_ok, best_recency_ok
+    return best_username, best_score, best_reasons, best_games, best_rating_ok, best_recency_ok, best_name_ok
 
 
 def _resolve_chesscom_by_search(
     name: str, rating: int | None, searxng_url: str, fide_country: str | None = None
-) -> tuple[str | None, float, list[str], int | None, bool, bool]:
+) -> tuple[str | None, float, list[str], int | None, bool, bool, bool]:
     """
     Web-search for the player's chess.com profile and score every
     candidate found on real name/rating/country — catches personalized
@@ -481,10 +508,10 @@ def _resolve_chesscom_by_search(
     try:
         from lookup.chesscom import find_usernames_via_search, get_profile
     except Exception:
-        return None, -1.0, [], None, True, True
+        return None, -1.0, [], None, True, True, True
 
     best_username, best_score, best_reasons = None, -1.0, []
-    best_games, best_rating_ok, best_recency_ok = None, True, True
+    best_games, best_rating_ok, best_recency_ok, best_name_ok = None, True, True, True
     for username in find_usernames_via_search(name, searxng_url):
         try:
             profile = get_profile(username)
@@ -505,8 +532,9 @@ def _resolve_chesscom_by_search(
         if score > best_score:
             best_username, best_score, best_reasons = username, score, reasons
             best_games, best_rating_ok, best_recency_ok = profile.get("games_count"), rating_ok, recency_ok
+            best_name_ok = name_s >= _MIN_NAME_SCORE_FOR_HIGH
 
-    return best_username, best_score, best_reasons, best_games, best_rating_ok, best_recency_ok
+    return best_username, best_score, best_reasons, best_games, best_rating_ok, best_recency_ok, best_name_ok
 
 
 def resolve_chesscom(name: str, rating: int | None = None,
@@ -527,20 +555,34 @@ def resolve_chesscom(name: str, rating: int | None = None,
     """
     name = _strip_title(name)
 
-    best_username, best_score, best_reasons, best_games, best_rating_ok, best_recency_ok = (
+    best_username, best_score, best_reasons, best_games, best_rating_ok, best_recency_ok, best_name_ok = (
         _resolve_chesscom_by_guessing(name, rating, fide_country))
 
-    if searxng_url and best_score < _HIGH_THRESHOLD:
-        s_username, s_score, s_reasons, s_games, s_rating_ok, s_recency_ok = _resolve_chesscom_by_search(
+    # Even if guessing already scored "high", a generic guess with no
+    # rating corroboration (best_name_ok False) isn't trustworthy enough to
+    # skip search on — the win could be a same-first-name stranger, and
+    # search is the only path that can find the real, differently-named
+    # account instead. See _MIN_NAME_SCORE_FOR_HIGH.
+    if searxng_url and (best_score < _HIGH_THRESHOLD or not best_name_ok):
+        s_username, s_score, s_reasons, s_games, s_rating_ok, s_recency_ok, s_name_ok = _resolve_chesscom_by_search(
             name, rating, searxng_url, fide_country)
-        if s_score > best_score:
+        # Prefer the search hit outright, even at a lower raw score, when
+        # the guess winner is a generic, uncorroborated guess (untrusted —
+        # see above) and search found a candidate whose name evidence is
+        # actually solid: a same-first-name stranger's inflated score from
+        # non-discriminating signals (country/games/recency) shouldn't
+        # outrank the real, differently-named account search just found.
+        if s_username is not None and (
+            s_score > best_score
+            or (not best_name_ok and s_name_ok and s_score >= _LOW_THRESHOLD)
+        ):
             best_username, best_score, best_reasons = s_username, s_score, s_reasons
-            best_games, best_rating_ok, best_recency_ok = s_games, s_rating_ok, s_recency_ok
+            best_games, best_rating_ok, best_recency_ok, best_name_ok = s_games, s_rating_ok, s_recency_ok, s_name_ok
 
     if best_username is None:
         return None, None, 0.0, []
 
-    confidence = _confidence_for(best_score, best_games, best_rating_ok, best_recency_ok)
+    confidence = _confidence_for(best_score, best_games, best_rating_ok, best_recency_ok, best_name_ok)
     if confidence == "low" and best_score >= _HIGH_THRESHOLD:
         if best_games is not None and best_games < _MIN_GAMES_FOR_HIGH:
             best_reasons = best_reasons + [f"capped from high: only {best_games} games on record"]
@@ -548,6 +590,8 @@ def resolve_chesscom(name: str, rating: int | None = None,
             best_reasons = best_reasons + ["capped from high: rating far outside tolerance"]
         elif not best_recency_ok:
             best_reasons = best_reasons + ["capped from high: no recent activity"]
+        elif not best_name_ok:
+            best_reasons = best_reasons + ["capped from high: generic username guess with no rating/real-name corroboration"]
     if confidence is None:
         return None, None, best_score, best_reasons
     return best_username, confidence, best_score, best_reasons

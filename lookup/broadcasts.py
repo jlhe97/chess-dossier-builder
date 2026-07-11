@@ -35,9 +35,32 @@ def _extract_round_id(url: str) -> str | None:
     return m.group(1) if m else None
 
 
-def find_broadcast_round_ids(player_name: str, searxng_url: str, max_results: int = 5) -> list[str]:
-    """Web-search for the player's name alongside Lichess broadcasts, return round IDs found."""
-    results = web_search(f'"{player_name}" lichess.org/broadcast', searxng_url, count=max_results)
+def _natural_name_order(name: str) -> str:
+    """'Last, First Middle' -> 'First Middle Last' — real web pages never
+    write a name in tournament-entry-list comma order."""
+    if "," not in name:
+        return name
+    last, _, first = name.partition(",")
+    return f"{first.strip()} {last.strip()}"
+
+
+def find_broadcast_round_ids(player_name: str, searxng_url: str, max_results: int = 10) -> list[str]:
+    """
+    Web-search for the player's name alongside Lichess broadcasts, return
+    round IDs found.
+
+    The query is natural-order, unquoted, and uses a bare domain — the
+    same fix already applied to lookup.lichess/chesscom's
+    find_usernames_via_search (see their docstrings/CLAUDE.md): exact-
+    phrase-quoting the raw "Last, First" order finds nothing (real pages
+    essentially never contain that literal comma-ordered substring), and
+    appending a path fragment like "lichess.org/broadcast" gets tokenized
+    as unrelated keyword noise rather than treated as a URL hint. This
+    module used to do both, which silently missed real, findable
+    broadcast rounds.
+    """
+    query_name = _natural_name_order(player_name)
+    results = web_search(f'{query_name} lichess.org', searxng_url, count=max_results)
     round_ids: list[str] = []
     for r in results:
         rid = _extract_round_id(r.get("url", ""))
@@ -53,7 +76,7 @@ def get_round_pgn(round_id: str) -> str:
     return resp.text
 
 
-def find_games(player_name: str, searxng_url: str, max_results: int = 5) -> list[str]:
+def find_games(player_name: str, searxng_url: str, max_results: int = 10) -> list[str]:
     """
     Search for broadcasts mentioning `player_name`, fetch matching rounds,
     and return every game in them as a PGN string. Games not actually

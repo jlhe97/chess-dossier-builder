@@ -115,7 +115,7 @@ def _fetch_megabase_games(name: str, db_path: str, limit: int | None = None,
         return []
 
 
-def _fetch_broadcast_games(name: str, searxng_url: str, max_results: int = 5) -> list[str]:
+def _fetch_broadcast_games(name: str, searxng_url: str, max_results: int = 10) -> list[str]:
     try:
         from lookup.broadcasts import find_games
         return find_games(name, searxng_url, max_results=max_results)

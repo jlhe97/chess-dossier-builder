@@ -420,6 +420,54 @@ class TestResolveChesscom:
         resolve_chesscom("Smith, John", searxng_url="http://localhost:8080")
         mock_search.assert_not_called()
 
+    @patch("lookup.chesscom.find_usernames_via_search")
+    @patch("lookup.chesscom.get_profile")
+    def test_search_still_tried_and_preferred_over_generic_guess_collision(
+            self, mock_get, mock_search):
+        # A player with no rating on file: every guess 404s except the bare
+        # "john" guess (index 7), which collides with an unrelated
+        # stranger's real, active, US account — country/games/recency alone
+        # drag that coincidence past the "high" threshold even though
+        # nothing actually ties it to this player. Search finds the real
+        # account (a personalized handle, with a genuine real-name match)
+        # at a *lower* raw score — it must still win, since the guess score
+        # is inflated by non-discriminating signals.
+        def get_profile_side_effect(username):
+            if username == "john":
+                return {"username": "john", "ratings": {}, "country": "US",
+                       "games_count": 2931, "last_active": "2026-07-09"}
+            if username == "smithy_gb":
+                return {"username": "smithy_gb", "real_name": "John Smith",
+                       "ratings": {"rapid": 2142}, "country": "GB",
+                       "games_count": 7466, "last_active": "2026-07-09"}
+            raise requests.HTTPError()
+
+        mock_get.side_effect = get_profile_side_effect
+        mock_search.return_value = ["smithy_gb"]
+
+        u, c, score, reasons = resolve_chesscom(
+            "Smith, John", searxng_url="http://localhost:8080")
+        mock_search.assert_called_once()
+        assert u == "smithy_gb"
+        assert c == "high"
+
+    @patch("lookup.chesscom.find_usernames_via_search")
+    @patch("lookup.chesscom.get_profile")
+    def test_generic_guess_collision_capped_to_low_without_search(self, mock_get, mock_search):
+        # Same coincidental "john" collision as above, but with no
+        # searxng_url to fall back on — must not be presented as "high"
+        # confidence just because it was the only candidate available.
+        mock_get.side_effect = lambda username: (
+            {"username": "john", "ratings": {}, "country": "US",
+             "games_count": 2931, "last_active": "2026-07-09"}
+            if username == "john" else (_ for _ in ()).throw(requests.HTTPError())
+        )
+        u, c, score, reasons = resolve_chesscom("Smith, John")
+        mock_search.assert_not_called()
+        assert score >= 0.55
+        assert c == "low"
+        assert any("generic username guess" in r for r in reasons)
+
     @patch("lookup.chesscom.get_profile")
     def test_real_name_on_file_upgrades_late_guess_to_high(self, mock_get):
         # A bare-surname guess ("kowalski") is generic and weak by guess

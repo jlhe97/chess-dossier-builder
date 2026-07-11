@@ -118,6 +118,21 @@ class TestFindBroadcastRoundIds:
         mock_search.return_value = [{"title": "a", "url": "https://example.com", "description": ""}]
         assert find_broadcast_round_ids("Nobody, N", "http://localhost:8080") == []
 
+    @patch("lookup.broadcasts.web_search")
+    def test_query_is_natural_order_unquoted_bare_domain(self, mock_search):
+        # The old query (exact-phrase-quoted, raw entry-list "Last, First"
+        # comma order, plus a "/broadcast" path fragment appended) silently
+        # missed real, findable broadcast rounds: quoting requires a page to
+        # contain that literal comma-ordered substring verbatim (it almost
+        # never does), and a path fragment gets tokenized as unrelated
+        # keyword noise rather than treated as a URL hint. Mirrors the fix
+        # already applied to lookup.lichess/chesscom's
+        # find_usernames_via_search.
+        mock_search.return_value = []
+        find_broadcast_round_ids("Nakamura, Hikaru", "http://localhost:8080")
+        query = mock_search.call_args[0][0]
+        assert query == "Hikaru Nakamura lichess.org"
+
 
 # ---------------------------------------------------------------------------
 # get_round_pgn / find_games
