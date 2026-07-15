@@ -11,7 +11,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 import requests
 
-from pipeline.resolver import resolve_lichess, resolve_chesscom, _similarity, _strip_title
+from pipeline.resolver import resolve_lichess, resolve_chesscom, _similarity, _strip_title, _name_score
 from pipeline.runner import _slug, run_pipeline, _ensure_game_links, _delink_broadcast_games
 from dossier.report import build_dossier, render_markdown, render_html, render_html_combined
 
@@ -32,6 +32,33 @@ class TestSimilarity:
 
     def test_no_match(self):
         assert _similarity("aaaa", "zzzz") == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# _name_score
+# ---------------------------------------------------------------------------
+
+class TestNameScore:
+    def test_username_surname_plus_initial_gets_floor(self):
+        # "jsmith" glues an initial onto the surname with no delimiter —
+        # the substring-anywhere check is exactly right here.
+        assert _name_score("Smith, John", "jsmith") >= 0.65
+
+    def test_real_name_whole_word_surname_gets_floor(self):
+        assert _name_score("Hunter, Jacob Carl", "Hunter Jacob") >= 0.65
+
+    def test_real_name_unrelated_stranger_does_not_get_floor(self):
+        # Real production false positive: "Imran" is a raw substring of
+        # "Simran Kolagad" once spaces are stripped, but Simran Kolagad is
+        # a totally unrelated person, not a name-order variant of "Sheikh
+        # Waali Imran". Real names have genuine word boundaries (spaces),
+        # so the surname must match a whole word, not just survive being
+        # glued to its neighbours.
+        score = _name_score("Imran, Sheikh Waali", "simran kolagad")
+        assert score < 0.65
+
+    def test_short_surname_still_requires_whole_word_in_real_name(self):
+        assert _name_score("Bao, Kangdi", "Rebaostein Anders") < 0.65
 
 
 # ---------------------------------------------------------------------------

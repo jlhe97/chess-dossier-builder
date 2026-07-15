@@ -100,19 +100,39 @@ def _similarity(a: str, b: str) -> float:
 
 def _name_score(name: str, candidate: str) -> float:
     """
-    Similarity between an entry-list name and a Lichess display name
-    (which is just their username, since Lichess has no real-name field).
+    Similarity between an entry-list name and a Lichess/chess.com display
+    name or real name.
 
     Blends raw character similarity with a surname-substring check, so a
     handle like "hikaru99" still scores well against "Nakamura, Hikaru"
     even though the two strings look quite different overall.
+
+    A `candidate` with a space is a natural "First Last"-style real name,
+    not a glued-together username, so it has genuine word boundaries —
+    the surname must match a *whole word*, not just appear as a substring
+    once boundaries are erased. Stripping spaces before comparing (as a
+    username-style candidate needs, since "jsmith" only matches "Smith"
+    once glued together) turns "Simran Kolagad" into "simrankolagad",
+    which contains "Imran" as a raw substring even though the two names
+    are unrelated — a real false-positive match seen in production
+    (entrant "Imran, Sheikh Waali" scored 0.65 against total stranger
+    "Simran Kolagad"). Username-style candidates keep the old
+    substring-anywhere check, since that's exactly the pattern a real
+    surname+initial/number username needs.
     """
     sim = _similarity(name, candidate)
     last = name.split(",")[0].strip() if "," in name else (name.split()[-1] if name.split() else "")
     last_norm = re.sub(r"[^a-z0-9]", "", last.lower())
-    cand_norm = re.sub(r"[^a-z0-9]", "", candidate.lower())
-    if len(last_norm) >= 3 and last_norm in cand_norm:
-        sim = max(sim, 0.65)
+    if len(last_norm) < 3:
+        return sim
+    if " " in candidate.strip():
+        words = [re.sub(r"[^a-z0-9]", "", w.lower()) for w in candidate.split()]
+        if last_norm in words:
+            sim = max(sim, 0.65)
+    else:
+        cand_norm = re.sub(r"[^a-z0-9]", "", candidate.lower())
+        if last_norm in cand_norm:
+            sim = max(sim, 0.65)
     return sim
 
 
